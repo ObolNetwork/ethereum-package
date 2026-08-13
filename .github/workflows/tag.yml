@@ -1,0 +1,160 @@
+name: tag
+
+on:
+  schedule:
+    # scheduled at 09:00 every day (2 hours after rebase)
+    - cron: "0 9 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  deployments: write
+
+jobs:
+  fetch_latest_tag:
+    runs-on: ubuntu-latest
+    outputs:
+      has_new_tag: ${{ steps.get_latest_tag.outputs.HAS_NEW_TAG }}
+      latest_tag: ${{ steps.get_latest_tag.outputs.LATEST_TAG }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          ref: main
+
+      - name: Import GPG key
+        env:
+          GPG_PRIVATE_KEY: ${{ secrets.GPG_PRIVATE_KEY }}
+        run: |
+          echo "$GPG_PRIVATE_KEY" | base64 -d | gpg --batch --import
+          gpg --list-secret-keys --keyid-format LONG
+
+      - name: Configure Git user
+        run: |
+          git config --global user.name "obol-platform"
+          git config --global user.email "platform@obol.tech"
+          git config --global user.signingkey "$(gpg --list-secret-keys --keyid-format LONG platform@obol.tech | grep sec | awk '{print $2}' | cut -d'/' -f2)"
+          git config --global commit.gpgsign true
+          git config --global tag.gpgsign true
+
+      - name: Fetch tags from upstream
+        env:
+          GITHUB_TOKEN: ${{ secrets.OBOL_PLATFORM_PAT }}
+        run: |
+          echo "Adding upstream repository"
+          git remote add upstream https://github.com/ethpandaops/ethereum-package
+          echo $(git remote -v)
+          echo "Fetching tags locally from origin"
+          git fetch --tags
+          echo "Origin tags fetched successfully"
+          echo "Fetching tags locally from upstream"
+          git fetch --tags upstream
+          echo "Upstream tags fetched successfully"
+
+      - name: Evaluate result
+        id: get_latest_tag
+        run: |
+          # Find the latest semver tag of the form X.Y.Z (no prefix, no suffix).
+          LATEST_TAG=$(git tag -l | grep -E '^[0-9]+\.[0-9]+\.[0-9]+$' | sort -V | tail -1)
+          if [ -z "$LATEST_TAG" ]; then
+            echo "No semver tag found"
+            echo "HAS_NEW_TAG=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          echo "Latest semver tag is $LATEST_TAG"
+          OBOL_TAG="${LATEST_TAG}-obol"
+          # Trigger tag_obol if the matching -obol tag does not yet exist,
+          # so failed previous runs can be retried on subsequent schedules.
+          if git rev-parse --verify --quiet "refs/tags/${OBOL_TAG}" > /dev/null; then
+            echo "${OBOL_TAG} already exists, nothing to do"
+            echo "HAS_NEW_TAG=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "${OBOL_TAG} does not exist, will create"
+            echo "LATEST_TAG=${LATEST_TAG}" >> "$GITHUB_OUTPUT"
+            echo "HAS_NEW_TAG=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Sync upstream tags
+        if: steps.get_latest_tag.outputs.HAS_NEW_TAG == 'true'
+        env:
+          GITHUB_TOKEN: ${{ secrets.OBOL_PLATFORM_PAT }}
+        run: |
+          echo "Pushing tags to origin"
+          git push --tags
+          echo "Successfully synced upstream tags with origin"
+
+  tag_obol:
+    runs-on: ubuntu-latest
+    needs: fetch_latest_tag
+    if: needs.fetch_latest_tag.outputs.has_new_tag == 'true'
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          fetch-depth: 0
+          ref: charon
+
+      - name: Import GPG key
+        env:
+          GPG_PRIVATE_KEY: ${{ secrets.GPG_PRIVATE_KEY }}
+        run: |
+          echo "$GPG_PRIVATE_KEY" | base64 -d | gpg --batch --import
+          gpg --list-secret-keys --keyid-format LONG
+
+      - name: Configure Git user
+        run: |
+          git config --global user.name "obol-platform"
+          git config --global user.email "platform@obol.tech"
+          git config --global user.signingkey "$(gpg --list-secret-keys --keyid-format LONG platform@obol.tech | grep sec | awk '{print $2}' | cut -d'/' -f2)"
+          git config --global commit.gpgsign true
+          git config --global tag.gpgsign true
+
+      - name: Rebase branch charon
+        id: rebase
+        env:
+          GITHUB_TOKEN: ${{ secrets.OBOL_PLATFORM_PAT }}
+        run: |
+          echo "Rebasing branch charon on tag ${{ needs.fetch_latest_tag.outputs.latest_tag }}"
+          git fetch
+          {
+            echo "RESULT<<EOF"
+            echo "$(git rebase --onto $(echo $(git log -n 1 --pretty=format:"%H" ${{ needs.fetch_latest_tag.outputs.latest_tag }} )) $(echo $(git log -n 1 --pretty=format:"%H" origin/main)) charon 2>&1)"
+            echo "EOF"
+          } >> "$GITHUB_OUTPUT"
+          echo "Rebase completed"
+
+      - name: Tag ObolNetwork/ethereum-package
+        if: contains(steps.rebase.outputs.RESULT, 'Successfully rebased and updated') || contains(steps.rebase.outputs.RESULT, 'is up to date.')
+        env:
+          GITHUB_TOKEN: ${{ secrets.OBOL_PLATFORM_PAT }}
+        run: |
+          tag="${{ needs.fetch_latest_tag.outputs.latest_tag }}-obol"
+          echo "Tagging new ObolNetwork/ethereum-package $tag"
+          git -c tag.gpgsign=false tag $tag
+          echo "Pushing new ObolNetwork/ethereum-package $tag tag"
+          git push --tags
+          echo "$tag tagged"
+
+      - name: Rebase failed error
+        if: (contains(steps.rebase.outputs.RESULT, 'error:') || contains(steps.rebase.outputs.RESULT, 'fatal:')) && !contains(steps.rebase.outputs.RESULT, 'Merge conflict in')
+        uses: rtCamp/action-slack-notify@e31e87e03dd19038e411e38ae27cbad084a90661 # v2
+        env:
+          SLACK_CHANNEL: dev-stack-releases
+          SLACK_COLOR: eb3d2c
+          SLACK_ICON: https://obol.org/ObolIcon.png?ref=blog.obol.org
+          SLACK_MESSAGE: "Failed to rebase branch charon on newly tagged version ${{ needs.fetch_latest_tag.outputs.latest_tag }} due to error"
+          SLACK_TITLE: "ethereum-package rebase failed - error"
+          SLACK_WEBHOOK: ${{ secrets.SLACK_DEV_STACK_RELEASES_WEBHOOK }}
+
+      - name: Rebase failed conflict
+        if: contains(steps.rebase.outputs.RESULT, 'Merge conflict in')
+        uses: rtCamp/action-slack-notify@e31e87e03dd19038e411e38ae27cbad084a90661 # v2
+        env:
+          SLACK_CHANNEL: dev-stack-releases
+          SLACK_COLOR: ecc926
+          SLACK_ICON: https://obol.org/ObolIcon.png?ref=blog.obol.org
+          SLACK_MESSAGE: "Failed to rebase branch charon on newly tagged version ${{ needs.fetch_latest_tag.outputs.latest_tag }} due to conflicts"
+          SLACK_TITLE: "ethereum-package rebase failed - conflicts"
+          SLACK_WEBHOOK: ${{ secrets.SLACK_DEV_STACK_RELEASES_WEBHOOK }}
