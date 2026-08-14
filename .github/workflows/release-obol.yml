@@ -1,0 +1,81 @@
+name: release-obol
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          fetch-depth: 0
+          ref: obol
+
+      - name: Import GPG key
+        env:
+          GPG_PRIVATE_KEY: ${{ secrets.GPG_PRIVATE_KEY }}
+        run: |
+          echo "$GPG_PRIVATE_KEY" | base64 -d | gpg --batch --import
+          gpg --list-secret-keys --keyid-format LONG
+
+      - name: Configure Git user
+        run: |
+          git config --global user.name "obol-platform"
+          git config --global user.email "platform@obol.tech"
+          git config --global user.signingkey "$(gpg --list-secret-keys --keyid-format LONG platform@obol.tech | grep sec | awk '{print $2}' | cut -d'/' -f2)"
+          git config --global commit.gpgsign true
+          git config --global tag.gpgsign true
+
+      - name: Determine next tag
+        id: next_tag
+        run: |
+          git fetch --tags
+
+          # Find the latest base tag (X.Y.Z-obol, no iteration suffix).
+          BASE_TAG=$(git tag -l | grep -E '^[0-9]+\.[0-9]+\.[0-9]+-obol$' | sort -V | tail -1)
+          if [ -z "$BASE_TAG" ]; then
+            echo "No base -obol tag found, cannot release an iteration"
+            exit 1
+          fi
+          # Strip the -obol suffix to get the version.
+          VERSION="${BASE_TAG%-obol}"
+          echo "Base version: $VERSION (from tag $BASE_TAG)"
+
+          # Find the highest existing iteration for this version.
+          LATEST_ITER=$(git tag -l "${VERSION}-obol.*" | grep -E "^${VERSION}-obol\.[0-9]+$" | sed "s/${VERSION}-obol\.//" | sort -n | tail -1)
+          if [ -z "$LATEST_ITER" ]; then
+            NEXT_ITER=1
+          else
+            NEXT_ITER=$((LATEST_ITER + 1))
+          fi
+
+          NEXT_TAG="${VERSION}-obol.${NEXT_ITER}"
+          echo "Next tag: $NEXT_TAG"
+          echo "NEXT_TAG=$NEXT_TAG" >> "$GITHUB_OUTPUT"
+
+      - name: Create and push tag
+        env:
+          GITHUB_TOKEN: ${{ secrets.OBOL_PLATFORM_PAT }}
+          NEXT_TAG: ${{ steps.next_tag.outputs.NEXT_TAG }}
+        run: |
+          echo "Tagging ObolNetwork/ethereum-package $NEXT_TAG"
+          git -c tag.gpgsign=false tag "$NEXT_TAG"
+          git push origin "refs/tags/$NEXT_TAG"
+          echo "$NEXT_TAG tagged"
+
+      - name: Tag failed
+        if: failure()
+        uses: rtCamp/action-slack-notify@e31e87e03dd19038e411e38ae27cbad084a90661 # v2
+        env:
+          SLACK_CHANNEL: dev-stack-releases
+          SLACK_COLOR: eb3d2c
+          SLACK_ICON: https://obol.org/ObolIcon.png?ref=blog.obol.org
+          SLACK_MESSAGE: "Failed to create release tag for ethereum-package"
+          SLACK_TITLE: "ethereum-package release failed"
+          SLACK_WEBHOOK: ${{ secrets.SLACK_DEV_STACK_RELEASES_WEBHOOK }}
