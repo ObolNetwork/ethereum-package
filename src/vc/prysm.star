@@ -28,6 +28,7 @@ def get_config(
     vc_index,
     extra_files_artifacts,
     vc_binary_artifact=None,
+    distributed=False,
 ):
     validator_keys_dirpath = shared_utils.path_join(
         constants.VALIDATOR_KEYS_DIRPATH_ON_SERVICE_CONTAINER,
@@ -52,9 +53,17 @@ def get_config(
         # ^^^^^^^^^^^^^^^^^^^ METRICS CONFIG ^^^^^^^^^^^^^^^^^^^^^
     ]
 
-    # Only add RPC provider if we're not using a blobber (blobber doesn't proxy RPC)
-    # Blobber uses port 5000, so check if that's in the URL
-    if ":5000" not in beacon_http_urls[0]:
+    use_beacon_api = (
+        cl_context.client_name != constants.CL_TYPE.prysm
+        or participant.blobber_enabled
+        or beacon_http_urls != [cl_context.beacon_http_url]
+        or distributed
+    )
+
+    if use_beacon_api:
+        cmd.append("--beacon-rest-api-provider=" + ",".join(beacon_http_urls))
+        cmd.append("--enable-beacon-rest-api")
+    else:
         cmd.append("--beacon-rpc-provider=" + cl_context.beacon_grpc_url)
 
     if remote_signer_context == None:
@@ -76,6 +85,9 @@ def get_config(
 
     if network_params.gas_limit > 0:
         cmd.append("--suggested-gas-limit={0}".format(network_params.gas_limit))
+
+    if distributed:
+        cmd.append("--distributed")
 
     keymanager_api_cmd = [
         "--rpc",

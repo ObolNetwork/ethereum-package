@@ -33,6 +33,7 @@ def get_config(
     vc_index,
     extra_files_artifacts,
     vc_binary_artifact=None,
+    distributed=False,
 ):
     log_level = input_parser.get_client_log_level_or_default(
         participant.vc_log_level, global_log_level, VERBOSITY_LEVELS
@@ -91,6 +92,11 @@ def get_config(
 
     if network_params.gas_limit > 0:
         cmd.append("--defaultGasLimit={0}".format(network_params.gas_limit))
+
+    if distributed:
+        cmd.append("--distributed")
+        cmd.append("--builder")
+        cmd.append("--builder.selection=builderalways")
 
     if len(participant.vc_extra_params) > 0:
         # this is a repeated<proto type>, we convert it into Starlark

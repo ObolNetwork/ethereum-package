@@ -36,6 +36,7 @@ def get_config(
     extra_files_artifacts,
     tempo_otlp_grpc_url=None,
     vc_binary_artifact=None,
+    distributed=False,
 ):
     log_level = input_parser.get_client_log_level_or_default(
         participant.vc_log_level, global_log_level, VERBOSITY_LEVELS
@@ -84,7 +85,12 @@ def get_config(
         cmd.append("--gas-limit={0}".format(network_params.gas_limit))
         cmd.append("--builder-proposals")
 
-    # Add tempo telemetry integration if tempo is enabled
+    if distributed:
+        cmd.append("--distributed")
+        if "--builder-proposals" not in cmd:
+            cmd.append("--builder-proposals")
+        cmd.append("--use-long-timeouts")
+
     if tempo_otlp_grpc_url != None:
         cmd.append("--telemetry-collector-url={}".format(tempo_otlp_grpc_url))
         cmd.append("--telemetry-service-name={}".format(service_name))

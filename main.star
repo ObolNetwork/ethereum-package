@@ -260,6 +260,7 @@ def run(plan, args={}):
         network_id,
         osaka_time,
         shadowfork_block_height,
+        charon_metrics_jobs,
     ) = participant_network.launch_participant_network(
         plan,
         args_with_right_defaults,
@@ -276,6 +277,8 @@ def run(plan, args={}):
         tempo_otlp_grpc_url,
         detected_backend,
     )
+
+    prometheus_additional_metrics_jobs.extend(charon_metrics_jobs)
 
     plan.print(
         "NODE JSON RPC URI: '{0}:{1}'".format(
