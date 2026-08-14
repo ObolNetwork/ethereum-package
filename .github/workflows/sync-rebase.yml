@@ -41,7 +41,7 @@ jobs:
         uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
         with:
           fetch-depth: 0
-          ref: charon
+          ref: obol
 
       - name: Import GPG key
         env:
@@ -58,12 +58,12 @@ jobs:
           git config --global commit.gpgsign true
           git config --global tag.gpgsign true
 
-      - name: Rebase branch charon
+      - name: Rebase branch obol
         id: rebase
         env:
           GITHUB_TOKEN: ${{ secrets.OBOL_PLATFORM_PAT }}
         run: |
-          echo "Rebasing branch charon on branch main"
+          echo "Rebasing branch obol on branch main"
           git fetch
           {
             echo "RESULT<<EOF"
@@ -78,7 +78,7 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.OBOL_PLATFORM_PAT }}
         run: |
           echo "Force pushing rebased branch"
-          git push --force-with-lease origin charon
+          git push --force-with-lease origin obol
           echo "Push successful"
 
       - name: Rebase failed error
@@ -88,7 +88,7 @@ jobs:
           SLACK_CHANNEL: dev-stack-releases
           SLACK_COLOR: eb3d2c
           SLACK_ICON: https://obol.org/ObolIcon.png?ref=blog.obol.org
-          SLACK_MESSAGE: "Failed to rebase branch charon on newly synced branch main due to error: ${{steps.rebase.outputs.RESULT}}"
+          SLACK_MESSAGE: "Failed to rebase branch obol on newly synced branch main due to error: ${{steps.rebase.outputs.RESULT}}"
           SLACK_TITLE: "ethereum-package rebase failed - error"
           SLACK_WEBHOOK: ${{ secrets.SLACK_DEV_STACK_RELEASES_WEBHOOK }}
 
@@ -99,6 +99,6 @@ jobs:
           SLACK_CHANNEL: dev-stack-releases
           SLACK_COLOR: ecc926
           SLACK_ICON: https://obol.org/ObolIcon.png?ref=blog.obol.org
-          SLACK_MESSAGE: "Failed to rebase branch charon on newly synced branch main due to conflicts"
+          SLACK_MESSAGE: "Failed to rebase branch obol on newly synced branch main due to conflicts"
           SLACK_TITLE: "ethereum-package rebase failed - conflicts"
           SLACK_WEBHOOK: ${{ secrets.SLACK_DEV_STACK_RELEASES_WEBHOOK }}

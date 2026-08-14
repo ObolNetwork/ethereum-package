@@ -94,7 +94,7 @@ jobs:
         uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
         with:
           fetch-depth: 0
-          ref: charon
+          ref: obol
 
       - name: Import GPG key
         env:
@@ -111,16 +111,16 @@ jobs:
           git config --global commit.gpgsign true
           git config --global tag.gpgsign true
 
-      - name: Rebase branch charon
+      - name: Rebase branch obol
         id: rebase
         env:
           GITHUB_TOKEN: ${{ secrets.OBOL_PLATFORM_PAT }}
         run: |
-          echo "Rebasing branch charon on tag ${{ needs.fetch_latest_tag.outputs.latest_tag }}"
+          echo "Rebasing branch obol on tag ${{ needs.fetch_latest_tag.outputs.latest_tag }}"
           git fetch
           {
             echo "RESULT<<EOF"
-            echo "$(git rebase --onto $(echo $(git log -n 1 --pretty=format:"%H" ${{ needs.fetch_latest_tag.outputs.latest_tag }} )) $(echo $(git log -n 1 --pretty=format:"%H" origin/main)) charon 2>&1)"
+            echo "$(git rebase --onto $(echo $(git log -n 1 --pretty=format:"%H" ${{ needs.fetch_latest_tag.outputs.latest_tag }} )) $(echo $(git log -n 1 --pretty=format:"%H" origin/main)) obol 2>&1)"
             echo "EOF"
           } >> "$GITHUB_OUTPUT"
           echo "Rebase completed"
@@ -144,7 +144,7 @@ jobs:
           SLACK_CHANNEL: dev-stack-releases
           SLACK_COLOR: eb3d2c
           SLACK_ICON: https://obol.org/ObolIcon.png?ref=blog.obol.org
-          SLACK_MESSAGE: "Failed to rebase branch charon on newly tagged version ${{ needs.fetch_latest_tag.outputs.latest_tag }} due to error"
+          SLACK_MESSAGE: "Failed to rebase branch obol on newly tagged version ${{ needs.fetch_latest_tag.outputs.latest_tag }} due to error"
           SLACK_TITLE: "ethereum-package rebase failed - error"
           SLACK_WEBHOOK: ${{ secrets.SLACK_DEV_STACK_RELEASES_WEBHOOK }}
 
@@ -155,6 +155,6 @@ jobs:
           SLACK_CHANNEL: dev-stack-releases
           SLACK_COLOR: ecc926
           SLACK_ICON: https://obol.org/ObolIcon.png?ref=blog.obol.org
-          SLACK_MESSAGE: "Failed to rebase branch charon on newly tagged version ${{ needs.fetch_latest_tag.outputs.latest_tag }} due to conflicts"
+          SLACK_MESSAGE: "Failed to rebase branch obol on newly tagged version ${{ needs.fetch_latest_tag.outputs.latest_tag }} due to conflicts"
           SLACK_TITLE: "ethereum-package rebase failed - conflicts"
           SLACK_WEBHOOK: ${{ secrets.SLACK_DEV_STACK_RELEASES_WEBHOOK }}
