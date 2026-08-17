@@ -1,4 +1,5 @@
 shared_utils = import_module("../../shared_utils/shared_utils.star")
+constants = import_module("../../package_io/constants.star")
 keystore_files_module = import_module("./keystore_files.star")
 keystores_result = import_module("./generate_keystores_result.star")
 
