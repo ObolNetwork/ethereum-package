@@ -79,9 +79,13 @@ def launch(
     # Validator client type/image to run behind each Charon node.
     vc_type = constants.CL_TYPE.lighthouse
     vc_image = input_parser.DEFAULT_CL_IMAGES[constants.CL_TYPE.lighthouse]
+    # Enable Charon's QUIC transport (adds a UDP listen address + feature flag) so
+    # the QUIC-specific reachability / black-hole / hole-punch metrics populate.
+    enable_quic = False
     if participant.charon_params != None:
         vc_type = participant.charon_params.get("charon_vc", vc_type)
         vc_image = participant.charon_params.get("charon_vc_image", vc_image)
+        enable_quic = participant.charon_params.get("enable_quic", False)
 
     # All Charon nodes connect to the same beacon node.
     beacon_endpoint = cl_context.beacon_http_url
@@ -145,48 +149,73 @@ def launch(
         ),
     )
 
-    # Wait a moment for files to be fully written
+    # The cluster creation runs as the split-keys service's command, which is
+    # asynchronous to this plan, so wait until the last node's cluster-lock
+    # exists before starting anything that reads the cluster files.
+    last_lock_file = "{0}node{1}/cluster-lock.json".format(
+        CHARON_DATA_DIRPATH_ON_CLIENT_CONTAINER, charon_node_count - 1
+    )
     plan.exec(
         service_name=cluster_files_service.name,
         recipe=ExecRecipe(
-            command=["sleep", "5"],
+            command=[
+                "sh",
+                "-c",
+                "i=0; until [ -f {0} ] || [ $i -ge 150 ]; do sleep 2; i=$((i+1)); done; test -f {0}".format(
+                    last_lock_file
+                ),
+            ],
         ),
     )
 
-    # Spin up a local Charon relay so the nodes can discover each other within
-    # the enclave instead of depending on the public Obol relay network.
-    relay_service = plan.add_service(
-        name=service_name + "-charon-relay-" + str(vc_index),
-        config=ServiceConfig(
-            image=image,
-            cmd=[
-                "relay",
-                "--data-dir=/opt/charon",
-                "--http-address=0.0.0.0:" + str(CHARON_RELAY_HTTP_PORT),
-                "--p2p-tcp-address=0.0.0.0:" + str(CHARON_P2P_TCP_PORT),
-                "--monitoring-address=0.0.0.0:" + str(CHARON_MONITORING_PORT),
-                # The relay lives on a private Kurtosis network; without this it
-                # advertises no addresses in its ENR and nodes fail to resolve it
-                # ("timeout resolving bootnode ENR").
-                "--p2p-advertise-private-addresses=true",
-            ],
-            ports={
-                "relay-http": PortSpec(
-                    number=CHARON_RELAY_HTTP_PORT,
-                    transport_protocol="TCP",
-                    application_protocol="http",
-                ),
-                "p2p-tcp": PortSpec(
-                    number=CHARON_P2P_TCP_PORT,
-                    transport_protocol="TCP",
-                ),
-            },
-            user=User(uid=0, gid=0),
-        ),
-    )
-    charon_relay_url = "http://{0}:{1}".format(
-        relay_service.ip_address, CHARON_RELAY_HTTP_PORT
-    )
+    # Resolve the relay the Charon nodes register with. When charon_params sets a
+    # non-empty "external_relay" (a URL or comma-separated URLs), the nodes point at
+    # that relay instead of an enclave-local one. This exercises realistic
+    # reachability / hole-punching / relay behaviour against a real relay. Otherwise
+    # a local relay is spun up so discovery stays self-contained on the private
+    # Kurtosis network.
+    external_relay = ""
+    if participant.charon_params != None:
+        external_relay = participant.charon_params.get("external_relay", "")
+
+    if external_relay != "":
+        charon_relay_url = external_relay
+        plan.print("Charon using external relay(s): " + charon_relay_url)
+    else:
+        # Spin up a local Charon relay so the nodes can discover each other within
+        # the enclave instead of depending on the public Obol relay network.
+        relay_service = plan.add_service(
+            name=service_name + "-charon-relay-" + str(vc_index),
+            config=ServiceConfig(
+                image=image,
+                cmd=[
+                    "relay",
+                    "--data-dir=/opt/charon",
+                    "--http-address=0.0.0.0:" + str(CHARON_RELAY_HTTP_PORT),
+                    "--p2p-tcp-address=0.0.0.0:" + str(CHARON_P2P_TCP_PORT),
+                    "--monitoring-address=0.0.0.0:" + str(CHARON_MONITORING_PORT),
+                    # The relay lives on a private Kurtosis network; without this it
+                    # advertises no addresses in its ENR and nodes fail to resolve it
+                    # ("timeout resolving bootnode ENR").
+                    "--p2p-advertise-private-addresses=true",
+                ],
+                ports={
+                    "relay-http": PortSpec(
+                        number=CHARON_RELAY_HTTP_PORT,
+                        transport_protocol="TCP",
+                        application_protocol="http",
+                    ),
+                    "p2p-tcp": PortSpec(
+                        number=CHARON_P2P_TCP_PORT,
+                        transport_protocol="TCP",
+                    ),
+                },
+                user=User(uid=0, gid=0),
+            ),
+        )
+        charon_relay_url = "http://{0}:{1}".format(
+            relay_service.ip_address, CHARON_RELAY_HTTP_PORT
+        )
 
     # Launch Charon nodes
     charon_services = []
@@ -216,6 +245,12 @@ def launch(
             "CHARON_TESTNET_NAME": "kurtosis",
         }
 
+        # Enable Charon's QUIC transport when requested: a UDP listen address plus
+        # the feature flag. Charon uses the same port number for TCP and QUIC/UDP.
+        if enable_quic:
+            env_vars["CHARON_FEATURE_SET_ENABLE"] = "quic"
+            env_vars["CHARON_P2P_UDP_ADDRESS"] = "0.0.0.0:" + str(CHARON_P2P_TCP_PORT)
+
         # Add any extra environment variables
         if participant.vc_extra_env_vars:
             env_vars.update(participant.vc_extra_env_vars)
@@ -237,6 +272,13 @@ def launch(
                 application_protocol="http",
             ),
         }
+
+        # Expose the QUIC UDP port (same number as TCP) when QUIC is enabled.
+        if enable_quic:
+            ports["p2p-udp"] = PortSpec(
+                number=CHARON_P2P_TCP_PORT,
+                transport_protocol="UDP",
+            )
 
         # Charon run command
         cmd = [

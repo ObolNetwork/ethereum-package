@@ -1632,6 +1632,9 @@ def default_participant():
         "charon_params": {
             "charon_vc": "lighthouse",
             "charon_vc_image": DEFAULT_CL_IMAGES[constants.CL_TYPE.lighthouse],
+            # Optional relay URL (or comma-separated URLs). When non-empty, Charon
+            # nodes register with this external relay instead of an enclave-local one.
+            "external_relay": "",
         },
         "vc_max_mem": 0,
         "vc_force_restart": False,
