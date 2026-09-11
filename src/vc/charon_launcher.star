@@ -306,6 +306,14 @@ def launch(
             name="validator-keys-node-" + str(i) + "-" + str(vc_index),
         )
 
+        # Gate the VC launch on this Charon node's validator API being ready.
+        # Otherwise VCs that fetch genesis/spec once at startup and fail fast
+        # (notably Nimbus) can abort before Charon is serving, which fails the
+        # whole enclave launch.
+        _wait_for_charon_validator_api(
+            plan, cluster_files_service.name, charon_validator_api_url
+        )
+
         vc_services.append(
             vc_launchers[vc_type](
                 plan=plan,
@@ -386,6 +394,35 @@ def launch(
             metrics_info=validator_node_metrics_info,
         ),
         metrics_jobs,
+    )
+
+
+def _wait_for_charon_validator_api(plan, exec_service_name, charon_validator_api_url):
+    """
+    Block until a Charon node's validator API is serving before launching its VC.
+
+    Charon's validator API (:3600) only answers once the node has booted and
+    connected to its beacon node. Some VCs — notably Nimbus — fetch genesis/spec
+    exactly once at startup and abort immediately if the API isn't ready yet
+    ("Could not obtain time configuration parameters"), which then fails the whole
+    enclave launch. Poll /eth/v1/beacon/genesis (proxied through to the beacon
+    node) until it returns 200, so the same path the VC needs is proven ready.
+
+    The probe runs on the already-running cluster-files busybox service, which is
+    alive throughout the VC launch loop.
+    """
+    probe_url = charon_validator_api_url + "/eth/v1/beacon/genesis"
+    plan.exec(
+        service_name=exec_service_name,
+        recipe=ExecRecipe(
+            command=[
+                "sh",
+                "-c",
+                "i=0; until wget -q -O /dev/null {0} || [ $i -ge 150 ]; do sleep 2; i=$((i+1)); done; wget -q -O /dev/null {0}".format(
+                    probe_url
+                ),
+            ],
+        ),
     )
 
 
