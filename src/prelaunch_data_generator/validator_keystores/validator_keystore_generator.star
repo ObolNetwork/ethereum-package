@@ -59,7 +59,6 @@ def charon_keystore_format_cmd(output_dirpath):
     )
 
 
-
 # Launches a prelaunch data generator IMAGE, for use in various of the genesis generation
 def launch_prelaunch_data_generator(
     plan,
