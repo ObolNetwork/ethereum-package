@@ -13,7 +13,6 @@ reth = import_module("./reth/reth_launcher.star")
 ethereumjs = import_module("./ethereumjs/ethereumjs_launcher.star")
 nimbus_eth1 = import_module("./nimbus-eth1/nimbus_launcher.star")
 ethrex = import_module("./ethrex/ethrex_launcher.star")
-dummy = import_module("./dummy/dummy_launcher.star")
 
 
 def launch(
@@ -33,7 +32,9 @@ def launch(
     mev_params,
     extra_files_artifacts={},
     bootnodoor_enode=None,
+    bootnodoor_el_enr=None,
     binary_artifacts={},
+    otel_otlp_grpc_url=None,
 ):
     el_launchers = {
         constants.EL_TYPE.geth: {
@@ -42,7 +43,6 @@ def launch(
                 jwt_file,
                 network_id,
             ),
-            "launch_method": geth.launch,
             "get_config": geth.get_config,
             "get_el_context": geth.get_el_context,
         },
@@ -51,7 +51,6 @@ def launch(
                 el_cl_data,
                 jwt_file,
             ),
-            "launch_method": besu.launch,
             "get_config": besu.get_config,
             "get_el_context": besu.get_el_context,
         },
@@ -61,7 +60,6 @@ def launch(
                 jwt_file,
                 network_id,
             ),
-            "launch_method": erigon.launch,
             "get_config": erigon.get_config,
             "get_el_context": erigon.get_el_context,
         },
@@ -70,7 +68,6 @@ def launch(
                 el_cl_data,
                 jwt_file,
             ),
-            "launch_method": nethermind.launch,
             "get_config": nethermind.get_config,
             "get_el_context": nethermind.get_el_context,
         },
@@ -79,7 +76,6 @@ def launch(
                 el_cl_data,
                 jwt_file,
             ),
-            "launch_method": reth.launch,
             "get_config": reth.get_config,
             "get_el_context": reth.get_el_context,
         },
@@ -90,7 +86,6 @@ def launch(
                 builder_type=mev_builder_type,
                 mev_params=mev_params,
             ),
-            "launch_method": reth.launch,
             "get_config": reth.get_config,
             "get_el_context": reth.get_el_context,
         },
@@ -99,7 +94,6 @@ def launch(
                 el_cl_data,
                 jwt_file,
             ),
-            "launch_method": ethereumjs.launch,
             "get_config": ethereumjs.get_config,
             "get_el_context": ethereumjs.get_el_context,
         },
@@ -108,7 +102,6 @@ def launch(
                 el_cl_data,
                 jwt_file,
             ),
-            "launch_method": nimbus_eth1.launch,
             "get_config": nimbus_eth1.get_config,
             "get_el_context": nimbus_eth1.get_el_context,
         },
@@ -119,16 +112,6 @@ def launch(
             ),
             "get_config": ethrex.get_config,
             "get_el_context": ethrex.get_el_context,
-            "launch_method": ethrex.launch,
-        },
-        constants.EL_TYPE.dummy: {
-            "launcher": dummy.new_dummy_launcher(
-                el_cl_data,
-                jwt_file,
-            ),
-            "launch_method": dummy.launch,
-            "get_config": dummy.get_config,
-            "get_el_context": dummy.get_el_context,
         },
     }
 
@@ -137,17 +120,25 @@ def launch(
     el_service_configs = {}
     el_participant_info = {}
 
-    # Generic bootnode ENODE override - can be set from bootnodoor or any other bootnode service
-    if bootnodoor_enode != None:
+    # Generic bootnode override - can be set from bootnodoor or any other bootnode service.
+    # Discv5-only clients get the EL ENR; discv4-only ethereumjs keeps the enode.
+    if bootnodoor_el_enr != None or bootnodoor_enode != None:
         plan.print(
-            "Using bootnode ENODE override for all EL clients: {0}".format(
-                bootnodoor_enode
+            "Using bootnode override for all EL clients: ENR {0} / ENODE {1}".format(
+                bootnodoor_el_enr, bootnodoor_enode
             )
         )
 
     for index, participant in enumerate(participants):
         cl_type = participant.cl_type
         el_type = participant.el_type
+
+        # Do not append here: Nones must appear only in the final ordered list, after
+        # parallel EL contexts are keyed by index (otherwise indices shift and CL gets
+        # the wrong el_context for participants with EL after a CL-only participant).
+        if el_type == constants.EL_TYPE.none:
+            continue
+
         node_selectors = input_parser.get_client_node_selectors(
             participant.node_selectors,
             global_node_selectors,
@@ -165,9 +156,8 @@ def launch(
                 )
             )
 
-        el_launcher, launch_method, get_config = (
+        el_launcher, get_config = (
             el_launchers[el_type]["launcher"],
-            el_launchers[el_type]["launch_method"],
             el_launchers[el_type]["get_config"],
         )
 
@@ -177,14 +167,25 @@ def launch(
         el_service_name = "el-{0}-{1}-{2}".format(index_str, el_type, cl_type)
         el_binary_artifact = binary_artifacts.get(index, {}).get("el", None)
 
+        # ethereumjs is discv4-only and needs the enode; every other client is
+        # discv5-only and needs the EL ENR
+        el_bootnode_override = (
+            bootnodoor_enode
+            if el_type == constants.EL_TYPE.ethereumjs
+            else bootnodoor_el_enr
+        )
+
         if index == 0:
-            el_context = launch_method(
+            # Launch the first participant serially so later participants can
+            # use it as a bootnode.
+            el_config = get_config(
                 plan,
                 el_launcher,
-                el_service_name,
                 participant,
-                global_log_level,
+                el_service_name,
                 all_el_contexts,
+                el_service_name.split("-")[3],
+                global_log_level,
                 persistent,
                 tolerations,
                 node_selectors,
@@ -192,8 +193,20 @@ def launch(
                 index,
                 network_params,
                 extra_files_artifacts,
-                bootnodoor_enode,
+                el_bootnode_override,
                 el_binary_artifact,
+                otel_otlp_grpc_url,
+            )
+
+            el_service = plan.add_service(
+                el_service_name, el_config, force_update=participant.el_force_restart
+            )
+
+            el_context = el_launchers[el_type]["get_el_context"](
+                plan,
+                el_service_name,
+                el_service,
+                el_launcher,
             )
 
             # Add participant el additional prometheus metrics
@@ -218,8 +231,9 @@ def launch(
                 index,
                 network_params,
                 extra_files_artifacts,
-                bootnodoor_enode,
+                el_bootnode_override,
                 el_binary_artifact,
+                otel_otlp_grpc_url,
             )
 
             el_participant_info[el_service_name] = {
@@ -256,10 +270,30 @@ def launch(
 
         el_contexts_temp[participant_index] = el_context
 
-    # Add remaining EL contexts in participant order (skipping index 0 which was added earlier)
-    for i in range(1, len(participants)):
-        if i in el_contexts_temp:
-            all_el_contexts.append(el_contexts_temp[i])
+    el_context_for_participant_zero = None
+    if len(participants) > 0 and participants[0].el_type != constants.EL_TYPE.none:
+        if len(all_el_contexts) != 1:
+            fail(
+                "Internal error: expected one EL context after launching participant 0, got {0}".format(
+                    len(all_el_contexts)
+                )
+            )
+        el_context_for_participant_zero = all_el_contexts[0]
+
+    ordered_el_contexts = []
+    for i in range(len(participants)):
+        if participants[i].el_type == constants.EL_TYPE.none:
+            ordered_el_contexts.append(None)
+        elif i == 0:
+            ordered_el_contexts.append(el_context_for_participant_zero)
+        elif i in el_contexts_temp:
+            ordered_el_contexts.append(el_contexts_temp[i])
+        else:
+            fail(
+                "Internal error: missing EL context for participant index {0}".format(i)
+            )
+
+    all_el_contexts = ordered_el_contexts
 
     plan.print("Successfully added {0} EL participants".format(num_participants))
     return all_el_contexts

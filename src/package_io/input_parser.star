@@ -9,19 +9,18 @@ sanity_check = import_module("./sanity_check.star")
 DEFAULT_EL_IMAGES = {
     "geth": "ethereum/client-go:latest",
     "erigon": "erigontech/erigon:latest",
-    "nethermind": "nethermind/nethermind:latest",
-    "besu": "hyperledger/besu:latest",
-    "reth": "ghcr.io/paradigmxyz/reth",
+    "nethermind": "ethpandaops/nethermind:master",
+    "besu": "ethpandaops/besu:main",
+    "reth": "ethpandaops/reth:main",
     "ethereumjs": "ethpandaops/ethereumjs:master",
     "nimbus": "statusim/nimbus-eth1:master",
-    "ethrex": "ghcr.io/lambdaclass/ethrex:latest",
-    "dummy": "ethpandaops/dummy-el:master",
+    "ethrex": "ethpandaops/ethrex:main",
 }
 
 DEFAULT_CL_IMAGES = {
     "lighthouse": "sigp/lighthouse:latest",
-    "teku": "ethpandaops/teku:master",
-    "nimbus": "statusim/nimbus-eth2:multiarch-latest",
+    "teku": "consensys/teku:latest",
+    "nimbus": "ethpandaops/nimbus-eth2:unstable",
     "prysm": "offchainlabs/prysm-beacon-chain:stable",
     "lodestar": "chainsafe/lodestar:latest",
     "grandine": "sifrai/grandine:stable",
@@ -43,9 +42,9 @@ DEFAULT_CL_IMAGES_MINIMAL = {
 DEFAULT_VC_IMAGES = {
     "lighthouse": "sigp/lighthouse:latest",
     "lodestar": "chainsafe/lodestar:latest",
-    "nimbus": "statusim/nimbus-validator-client:multiarch-latest",
+    "nimbus": "ethpandaops/nimbus-validator-client:unstable",
     "prysm": "offchainlabs/prysm-validator:stable",
-    "teku": "ethpandaops/teku:master",
+    "teku": "consensys/teku:latest",
     "grandine": "sifrai/grandine:stable",
     "vero": "ghcr.io/serenita-org/vero:latest",
     "consensoor": "ethpandaops/consensoor:main",
@@ -87,10 +86,10 @@ ATTR_TO_BE_SKIPPED_AT_ROOT = (
     "tempo_params",
     "tx_fuzz_params",
     "rakoon_params",
-    "custom_flood_params",
     "xatu_sentry_params",
     "port_publisher",
     "spamoor_params",
+    "disruptoor_params",
     "snooper_params",
     "slashoor_params",
     "bootnodoor_params",
@@ -98,7 +97,125 @@ ATTR_TO_BE_SKIPPED_AT_ROOT = (
     "zkboost_params",
     "buildoor_params",
     "ethereum_genesis_generator_params",
+    "trueblocks_params",
 )
+
+
+def validate_slot_duration_heze(network_params):
+    slot_duration_ms_heze = network_params["slot_duration_ms_heze"]
+
+    if (
+        type(slot_duration_ms_heze) != "int"
+        or slot_duration_ms_heze <= 0
+        or slot_duration_ms_heze % 1000 != 0
+    ):
+        fail(
+            "slot_duration_ms_heze must be a positive multiple of 1000, got {0}".format(
+                slot_duration_ms_heze
+            )
+        )
+
+
+def schedule_heze_slot_duration_bpo(plan, network_params, user_network_params):
+    heze_epoch = network_params["heze_fork_epoch"]
+    old_ms = network_params["slot_duration_ms"]
+    new_ms = network_params["slot_duration_ms_heze"]
+    if (
+        heze_epoch == constants.FAR_FUTURE_EPOCH
+        or heze_epoch == 0
+        or new_ms == old_ms
+        or network_params["frames_enabled"]
+    ):
+        return
+
+    fields = ["epoch", "target_blobs", "max_blobs", "base_fee_update_fraction"]
+    bpos = []
+    for i in range(1, 6):
+        bpo = {
+            field: network_params["bpo_{0}_{1}".format(i, field)] for field in fields
+        }
+        if bpo["epoch"] == heze_epoch:
+            return
+        if bpo["epoch"] != constants.FAR_FUTURE_EPOCH:
+            bpos.append(bpo)
+
+    if len(bpos) == 5:
+        plan.print(
+            "WARNING: slot_duration_ms_heze ({0}) differs from slot_duration_ms ({1}) but all BPOs are in use, so no BPO is scheduled at heze_fork_epoch ({2}) to keep blob throughput per second".format(
+                new_ms, old_ms, heze_epoch
+            )
+        )
+        return
+
+    prev = {
+        "target_blobs": network_params["target_blobs_per_block_electra"],
+        "max_blobs": network_params["max_blobs_per_block_electra"],
+        "base_fee_update_fraction": network_params["base_fee_update_fraction_electra"],
+    }
+    index = 0
+    for bpo in bpos:
+        if bpo["epoch"] < heze_epoch:
+            prev = bpo
+            index += 1
+
+    slot = index + 1
+    user_fields = []
+    if slot > len(bpos):
+        user_fields = [
+            field
+            for field in fields[1:]
+            if "bpo_{0}_{1}".format(slot, field) in user_network_params
+        ]
+
+    if user_fields:
+        heze_bpo = {
+            field: network_params["bpo_{0}_{1}".format(slot, field)] for field in fields
+        }
+        heze_bpo["epoch"] = heze_epoch
+        message = "with the user-provided {0}".format(", ".join(user_fields))
+    else:
+        prev_target = prev["target_blobs"]
+        prev_max = prev["max_blobs"]
+        prev_fraction = prev["base_fee_update_fraction"]
+        if prev_fraction == 0:
+            prev_fraction = int(prev_max * 131072 / 0.23556607131276688 + 0.5)
+        target = (2 * prev_target * new_ms + old_ms) // (2 * old_ms)
+        if target < 1:
+            target = 1
+        heze_bpo = {
+            "epoch": heze_epoch,
+            "target_blobs": target,
+            "max_blobs": (2 * prev_max * target + prev_target) // (2 * prev_target),
+            "base_fee_update_fraction": (
+                2 * prev_fraction * target * old_ms + prev_target * new_ms
+            )
+            // (2 * prev_target * new_ms),
+        }
+        message = "for {0}ms -> {1}ms slots: target {2} -> {3}, max {4} -> {5}, base fee update fraction {6} -> {7}".format(
+            old_ms,
+            new_ms,
+            prev_target,
+            heze_bpo["target_blobs"],
+            prev_max,
+            heze_bpo["max_blobs"],
+            prev_fraction,
+            heze_bpo["base_fee_update_fraction"],
+        )
+
+    bpos.insert(index, heze_bpo)
+    for i, bpo in enumerate(bpos):
+        for field in fields:
+            network_params["bpo_{0}_{1}".format(i + 1, field)] = bpo[field]
+
+    plan.print(
+        "Scheduled BPO {0} at heze_fork_epoch {1} {2}".format(slot, heze_epoch, message)
+    )
+    if slot < len(bpos):
+        plan.print(
+            "Shifted BPOs scheduled after heze_fork_epoch to BPO {0}-{1}".format(
+                slot + 1, len(bpos)
+            )
+        )
 
 
 def input_parser(plan, input_args):
@@ -121,7 +238,6 @@ def input_parser(plan, input_args):
         result["additional_services"] = []
     result["tx_fuzz_params"] = get_default_tx_fuzz_params()
     result["rakoon_params"] = get_default_rakoon_params()
-    result["custom_flood_params"] = get_default_custom_flood_params()
     result["disable_peer_scoring"] = False
     result["grafana_params"] = get_default_grafana_params()
     result["assertoor_params"] = get_default_assertoor_params()
@@ -135,16 +251,12 @@ def input_parser(plan, input_args):
     result["port_publisher"] = get_port_publisher_params("default")
     result["snooper_params"] = get_default_snooper_params()
     result["spamoor_params"] = get_default_spamoor_params()
+    result["disruptoor_params"] = get_default_disruptoor_params()
     result["slashoor_params"] = get_default_slashoor_params()
     result["mempool_bridge_params"] = get_default_mempool_bridge_params()
     result["zkboost_params"] = get_default_zkboost_params()
     result["buildoor_params"] = get_default_buildoor_params()
-
-    if constants.NETWORK_NAME.shadowfork in result["network_params"]["network"]:
-        shadow_base = result["network_params"]["network"].split("-shadowfork")[0]
-        result["network_params"][
-            "deposit_contract_address"
-        ] = constants.DEPOSIT_CONTRACT_ADDRESS[shadow_base]
+    result["trueblocks_params"] = get_default_trueblocks_params()
 
     if constants.NETWORK_NAME.shadowfork in result["network_params"]["network"]:
         shadow_base = result["network_params"]["network"].split("-shadowfork")[0]
@@ -182,10 +294,6 @@ def input_parser(plan, input_args):
             for sub_attr in input_args["rakoon_params"]:
                 sub_value = input_args["rakoon_params"][sub_attr]
                 result["rakoon_params"][sub_attr] = sub_value
-        elif attr == "custom_flood_params":
-            for sub_attr in input_args["custom_flood_params"]:
-                sub_value = input_args["custom_flood_params"][sub_attr]
-                result["custom_flood_params"][sub_attr] = sub_value
         elif attr == "assertoor_params":
             for sub_attr in input_args["assertoor_params"]:
                 sub_value = input_args["assertoor_params"][sub_attr]
@@ -216,6 +324,10 @@ def input_parser(plan, input_args):
             for sub_attr in input_args["spamoor_params"]:
                 sub_value = input_args["spamoor_params"][sub_attr]
                 result["spamoor_params"][sub_attr] = sub_value
+        elif attr == "disruptoor_params":
+            for sub_attr in input_args["disruptoor_params"]:
+                sub_value = input_args["disruptoor_params"][sub_attr]
+                result["disruptoor_params"][sub_attr] = sub_value
         elif attr == "slashoor_params":
             for sub_attr in input_args["slashoor_params"]:
                 sub_value = input_args["slashoor_params"][sub_attr]
@@ -244,6 +356,14 @@ def input_parser(plan, input_args):
             for sub_attr in input_args["buildoor_params"]:
                 sub_value = input_args["buildoor_params"][sub_attr]
                 result["buildoor_params"][sub_attr] = sub_value
+        elif attr == "trueblocks_params":
+            for sub_attr in input_args["trueblocks_params"]:
+                sub_value = input_args["trueblocks_params"][sub_attr]
+                if sub_attr == "scrape":
+                    for k, v in sub_value.items():
+                        result["trueblocks_params"]["scrape"][k] = v
+                else:
+                    result["trueblocks_params"][sub_attr] = sub_value
 
     if result.get("snooper_enabled"):
         plan.print(
@@ -253,6 +373,14 @@ def input_parser(plan, input_args):
 
     if result.get("disable_peer_scoring"):
         result = enrich_disable_peer_scoring(result)
+
+    if result.get("mev_type") == constants.BUILDOOR_MEV_TYPE:
+        plan.print(
+            "DEPRECATION WARNING: mev_type: buildoor (single shared builder) is "
+            + "deprecated and will be dropped after the gloas fork. Use the "
+            + "buildoor_params.instances config instead, which spins up dedicated "
+            + "buildoor builders wired to specific participants."
+        )
 
     if result.get("mev_type") in (
         constants.MOCK_MEV_TYPE,
@@ -277,6 +405,81 @@ def input_parser(plan, input_args):
             )
         )
 
+    # Per-participant buildoor builders. buildoor is an additional_service: it is
+    # only spun up when "buildoor" is in additional_services. Its targeting is
+    # configured (independently of the participants) via buildoor_params.instances
+    # ([{participant, count}]); a builder is independent of the network - it reads
+    # one participant's CL/EL and, in ePBS, gossips bids to all.
+    buildoor_enabled = constants.BUILDOOR_SERVICE_NAME in result["additional_services"]
+    buildoor_instances = result["buildoor_params"]["instances"]
+    if buildoor_instances and not buildoor_enabled:
+        fail(
+            "buildoor_params.instances is set but 'buildoor' is not in additional_services. "
+            + "Add 'buildoor' to additional_services to spin it up."
+        )
+    if buildoor_enabled:
+        if result.get("mev_type") != None:
+            fail(
+                "additional_services buildoor cannot be combined with a global mev_type ({0}). ".format(
+                    result.get("mev_type")
+                )
+                + "Use additional_services: [buildoor] with buildoor_params.instances for dedicated "
+                + "per-participant builders, or mev_type: buildoor for a single shared builder, but not both."
+            )
+        # Default to a single builder on the first participant when none configured.
+        if not buildoor_instances:
+            buildoor_instances = [{"participant": 1, "count": 1}]
+            result["buildoor_params"]["instances"] = buildoor_instances
+        seen_buildoor_participants = {}
+        for instance in buildoor_instances:
+            participant_num = instance["participant"]
+            if (
+                type(participant_num) != "int"
+                or participant_num < 1
+                or participant_num > len(result["participants"])
+            ):
+                fail(
+                    "buildoor_params.instances participant must be a 1-based participant index between 1 and {0}, got {1}.".format(
+                        len(result["participants"]),
+                        participant_num,
+                    )
+                )
+            if participant_num in seen_buildoor_participants:
+                fail(
+                    "buildoor_params.instances has duplicate entries for participant {0}; use a single entry with the desired count.".format(
+                        participant_num
+                    )
+                )
+            seen_buildoor_participants[participant_num] = True
+            # count is optional and defaults to a single builder per entry.
+            instance_count = instance.get("count", 1)
+            if type(instance_count) != "int" or instance_count < 1:
+                fail(
+                    "buildoor_params.instances count for participant {0} must be an integer >= 1, got {1}.".format(
+                        participant_num,
+                        instance_count,
+                    )
+                )
+            # Optional per-instance image override (A/B testing). When omitted the
+            # instance falls back to buildoor_params.image.
+            if (
+                instance.get("image", None) != None
+                and type(instance["image"]) != "string"
+            ):
+                fail(
+                    "buildoor_params.instances image for participant {0} must be a string, got {1}.".format(
+                        participant_num,
+                        instance["image"],
+                    )
+                )
+        # Each buildoor instance is its own builder, onboarded after genesis via
+        # its lifecycle deposit (buildoor_params.lifecycle) rather than registered
+        # at genesis. So no genesis builder registration is needed and gloas does
+        # not have to be at genesis - buildoor works with gloas at any epoch. Its
+        # builder keys are derived at indices after any genesis builders (see
+        # main.star) to avoid colliding with validator/genesis-builder keys.
+        result = enrich_buildoor_per_participant(result)
+
     if (
         result["mev_params"].get("mev_builder_subsidy") != 0
         and result["network_params"].get("prefunded_accounts") == {}
@@ -296,7 +499,7 @@ def input_parser(plan, input_args):
 
     # Check for shadowfork + archive mode and unsupported client + archive mode combinations
     is_shadowfork = "shadowfork" in result["network_params"]["network"]
-    unsupported_archive_clients = ["dummy", "ethrex", "ethereumjs", "nimbus"]
+    unsupported_archive_clients = ["ethrex", "ethereumjs", "nimbus"]
 
     for idx, participant in enumerate(result["participants"]):
         el_type = participant["el_type"]
@@ -384,18 +587,26 @@ def input_parser(plan, input_args):
             "Mock mev is only supported if the first participant is lighthouse client, please use a different client or set mev_type to 'flashbots', 'mev-rs' or 'commit-boost' or make the first participant lighthouse"
         )
 
-    if (
-        result["network_params"]["bpo_1_epoch"]
-        < result["network_params"]["fulu_fork_epoch"]
-    ):
-        result["network_params"]["bpo_1_epoch"] = result["network_params"][
-            "fulu_fork_epoch"
-        ]
-        plan.print(
-            "BPO 1 epoch adjusted to Fulu epoch {0}".format(
-                result["network_params"]["fulu_fork_epoch"]
-            )
-        )
+    if result["network_params"]["fulu_fork_epoch"] != 0:
+        for bpo_key in [
+            "bpo_1_epoch",
+            "bpo_2_epoch",
+            "bpo_3_epoch",
+            "bpo_4_epoch",
+            "bpo_5_epoch",
+        ]:
+            if (
+                result["network_params"][bpo_key]
+                < result["network_params"]["fulu_fork_epoch"]
+            ):
+                fail(
+                    "fulu_fork_epoch is not at genesis ({0}), but {1} ({2}) is scheduled before it. BPO forks require Fulu, so when Fulu is not at genesis you must explicitly set every bpo_*_epoch to an epoch >= fulu_fork_epoch, or to {3} to disable the BPO.".format(
+                        result["network_params"]["fulu_fork_epoch"],
+                        bpo_key,
+                        result["network_params"][bpo_key],
+                        constants.FAR_FUTURE_EPOCH,
+                    )
+                )
     if (
         result["network_params"]["bpo_2_epoch"]
         < result["network_params"]["bpo_1_epoch"]
@@ -445,6 +656,43 @@ def input_parser(plan, input_args):
             )
         )
 
+    if (
+        "gas_limit_schedule" not in input_args.get("network_params", {})
+        and result["network_params"]["gloas_fork_epoch"] != constants.FAR_FUTURE_EPOCH
+    ):
+        result["network_params"]["gas_limit_schedule"] = [
+            {
+                "epoch": result["network_params"]["gloas_fork_epoch"],
+                "gas_limit": 200000000,
+            }
+        ]
+
+    for entry in result["network_params"]["gas_limit_schedule"]:
+        if type(entry) != "dict" or sorted(entry.keys()) != ["epoch", "gas_limit"]:
+            fail(
+                "gas_limit_schedule entries must be objects with exactly 'epoch' and 'gas_limit' keys, got: {0}".format(
+                    entry
+                )
+            )
+        if type(entry["epoch"]) != "int" or type(entry["gas_limit"]) != "int":
+            fail(
+                "gas_limit_schedule 'epoch' and 'gas_limit' must be integers, got: {0}".format(
+                    entry
+                )
+            )
+        if entry["epoch"] < result["network_params"]["gloas_fork_epoch"]:
+            fail(
+                "gas_limit_schedule entry at epoch {0} is scheduled before gloas_fork_epoch ({1}). The gas limit schedule requires Gloas, since the CL only drives the gas limit post-Gloas — schedule every entry at an epoch >= gloas_fork_epoch.".format(
+                    entry["epoch"],
+                    result["network_params"]["gloas_fork_epoch"],
+                )
+            )
+
+    validate_slot_duration_heze(result["network_params"])
+    schedule_heze_slot_duration_bpo(
+        plan, result["network_params"], input_args.get("network_params", {})
+    )
+
     if result["network_params"]["fulu_fork_epoch"] != constants.FAR_FUTURE_EPOCH:
         has_supernodes = False
         has_node_with_128_plus_validators = False
@@ -480,21 +728,103 @@ def input_parser(plan, input_args):
             )
 
     if "zkboost" in result["additional_services"]:
-        has_non_dummy_el = False
-        for participant in result["participants"]:
-            if participant["el_type"] != "dummy":
-                has_non_dummy_el = True
-        if not has_non_dummy_el:
-            fail(
-                "zkboost is enabled but all participants are using dummy EL. At least one participant must use a real EL client (geth, reth, nethermind, etc.) to produce blocks."
+        if "RUST_LOG" not in result["zkboost_params"]["env"]:
+            result["zkboost_params"]["env"]["RUST_LOG"] = "info,zkboost=debug"
+
+        # Validate zkvm configurations
+        valid_proof_types = [
+            "ethrex-openvm",
+            "ethrex-sp1",
+            "ethrex-zisk",
+            "reth-openvm",
+            "reth-sp1",
+            "reth-zisk",
+        ]
+        effective_zkvms = []
+        effective_ere_zkvms_by_proof_type = {}
+        for instance_idx, instance in enumerate(result["zkboost_params"]["instances"]):
+            instance_zkvms = instance.get("zkvms", result["zkboost_params"]["zkvms"])
+            instance_proof_types = []
+            for zkvm_idx, zkvm in enumerate(instance_zkvms):
+                proof_type = zkvm.get("proof_type")
+                if proof_type in instance_proof_types:
+                    fail(
+                        "zkboost_params.instances[{0}].zkvms[{1}]: duplicate proof_type '{2}' in instance '{3}'".format(
+                            instance_idx,
+                            zkvm_idx,
+                            proof_type,
+                            instance.get("name", str(instance_idx)),
+                        )
+                    )
+                instance_proof_types.append(proof_type)
+                effective_zkvms.append((instance_idx, zkvm_idx, zkvm))
+                if (
+                    zkvm.get("kind") == "ere"
+                    and "endpoint" not in zkvm
+                    and proof_type not in effective_ere_zkvms_by_proof_type
+                ):
+                    effective_ere_zkvms_by_proof_type[proof_type] = zkvm
+
+        for inst_idx, zkvm_idx, zkvm in effective_zkvms:
+            kind = zkvm.get("kind")
+            proof_type = zkvm.get("proof_type")
+            zkvm_path = "zkboost_params.instances[{0}].zkvms[{1}]".format(
+                inst_idx, zkvm_idx
             )
+
+            if kind not in ["ere", "cluster", "mock"]:
+                fail(
+                    "{0}: unsupported kind '{1}', please use 'ere', 'cluster', or 'mock'".format(
+                        zkvm_path, kind
+                    )
+                )
+
+            if proof_type not in valid_proof_types:
+                fail(
+                    "{0}: unsupported proof_type '{1}', please use one of: {2}".format(
+                        zkvm_path, proof_type, ", ".join(valid_proof_types)
+                    )
+                )
+
+            # Default proof_timeout_secs to 3/4 of slot duration (minimum 1 second)
+            default_proof_timeout = max(
+                1, result["network_params"]["slot_duration_ms"] * 3 // 4000
+            )
+            zkvm["proof_timeout_secs"] = zkvm.get(
+                "proof_timeout_secs", default_proof_timeout
+            )
+            if zkvm["proof_timeout_secs"] <= 0:
+                fail(
+                    "{0}: proof_timeout_secs must be > 0, got {1}".format(
+                        zkvm_path, zkvm["proof_timeout_secs"]
+                    )
+                )
+
+            # Default mock proving time to 1/2 of slot duration, below the default proof timeout
+            if kind == "mock" and "mock_proving_time" not in zkvm:
+                zkvm["mock_proving_time"] = {
+                    "kind": "constant",
+                    "ms": result["network_params"]["slot_duration_ms"] // 2,
+                }
+
+            if kind == "cluster":
+                if zkvm.get("endpoint", "") == "":
+                    fail("{0}: cluster zkvm requires 'endpoint'".format(zkvm_path))
+                if proof_type.split("-")[-1] not in ["zisk", "openvm"]:
+                    fail(
+                        "{0}: cluster zkvm supports only zisk and openvm proof types".format(
+                            zkvm_path
+                        )
+                    )
+
+        _validate_ere_gpu_config(effective_ere_zkvms_by_proof_type.values())
 
     if (
         "bootnodoor" not in result["additional_services"]
-        and result["participants"][0]["el_type"] == "dummy"
+        and result["participants"][0]["el_type"] == constants.EL_TYPE.none
     ):
         fail(
-            "First participant cannot use dummy EL without bootnodoor enabled. The first participant acts as the bootnode for the network. Either enable bootnodoor in additional_services or use a real EL client (geth, reth, nethermind, etc.) for the first participant."
+            "First participant cannot have el_type=None without bootnodoor enabled. The first participant acts as the bootnode for the network. Either enable bootnodoor in additional_services or use a real EL client (geth, reth, nethermind, etc.) for the first participant."
         )
 
     if (
@@ -504,6 +834,22 @@ def input_parser(plan, input_args):
     ):
         fail(
             "Mempool bridge is enabled but network is not mainnet, sepolia, hoodi or shadowfork, please set network to mainnet, sepolia, hoodi or shadowfork"
+        )
+
+    apache_deprecation_warning = False
+    if result.get("apache_port") != None and "nginx_port" not in input_args:
+        result["nginx_port"] = result["apache_port"]
+        apache_deprecation_warning = True
+    if "additional_services" in result and "apache" in result["additional_services"]:
+        result["additional_services"] = [
+            "nginx" if svc == "apache" else svc for svc in result["additional_services"]
+        ]
+        apache_deprecation_warning = True
+    if apache_deprecation_warning:
+        plan.print(
+            "WARNING: 'apache' is deprecated and has been removed. "
+            + "Use 'nginx' / 'nginx_port' instead; "
+            + "your apache settings have been silently routed to nginx."
         )
 
     return struct(
@@ -591,7 +937,9 @@ def input_parser(plan, input_args):
                 blobber_image=participant["blobber_image"],
                 keymanager_enabled=participant["keymanager_enabled"],
                 vc_beacon_node_indices=participant["vc_beacon_node_indices"],
-                checkpoint_sync_enabled=participant["checkpoint_sync_enabled"],
+                checkpoint_sync_enabled=participant["checkpoint_sync_enabled"]
+                if participant["checkpoint_sync_enabled"] != None
+                else result["checkpoint_sync_enabled"],
                 skip_start=participant["skip_start"],
                 # Charon-specific parameters
                 charon_node_count=participant["charon_node_count"],
@@ -606,6 +954,7 @@ def input_parser(plan, input_args):
             preregistered_validator_count=result["network_params"][
                 "preregistered_validator_count"
             ],
+            builder_keys_mnemonic=result["network_params"]["builder_keys_mnemonic"],
             num_validator_keys_per_node=result["network_params"][
                 "num_validator_keys_per_node"
             ],
@@ -622,6 +971,9 @@ def input_parser(plan, input_args):
                 "max_per_epoch_activation_churn_limit"
             ],
             churn_limit_quotient=result["network_params"]["churn_limit_quotient"],
+            confirmation_byzantine_threshold=result["network_params"][
+                "confirmation_byzantine_threshold"
+            ],
             ejection_balance=result["network_params"]["ejection_balance"],
             eth1_follow_distance=result["network_params"]["eth1_follow_distance"],
             altair_fork_epoch=result["network_params"]["altair_fork_epoch"],
@@ -632,12 +984,16 @@ def input_parser(plan, input_args):
             fulu_fork_epoch=result["network_params"]["fulu_fork_epoch"],
             gloas_fork_epoch=result["network_params"]["gloas_fork_epoch"],
             heze_fork_epoch=result["network_params"]["heze_fork_epoch"],
+            frames_enabled=result["network_params"]["frames_enabled"],
             network=result["network_params"]["network"],
             min_validator_withdrawability_delay=result["network_params"][
                 "min_validator_withdrawability_delay"
             ],
             min_builder_withdrawability_delay=result["network_params"][
                 "min_builder_withdrawability_delay"
+            ],
+            deploy_eip8282_contracts=result["network_params"][
+                "deploy_eip8282_contracts"
             ],
             shard_committee_period=result["network_params"]["shard_committee_period"],
             attestation_due_bps_gloas=result["network_params"][
@@ -650,16 +1006,12 @@ def input_parser(plan, input_args):
             contribution_due_bps_gloas=result["network_params"][
                 "contribution_due_bps_gloas"
             ],
+            payload_due_bps=result["network_params"]["payload_due_bps"],
             payload_attestation_due_bps=result["network_params"][
                 "payload_attestation_due_bps"
             ],
             view_freeze_cutoff_bps=result["network_params"]["view_freeze_cutoff_bps"],
-            inclusion_list_submission_due_bps=result["network_params"][
-                "inclusion_list_submission_due_bps"
-            ],
-            proposer_inclusion_list_cutoff_bps=result["network_params"][
-                "proposer_inclusion_list_cutoff_bps"
-            ],
+            inclusion_list_due_bps=result["network_params"]["inclusion_list_due_bps"],
             network_sync_base_url=result["network_params"]["network_sync_base_url"],
             force_snapshot_sync=result["network_params"]["force_snapshot_sync"],
             shadowfork_block_height=result["network_params"]["shadowfork_block_height"],
@@ -712,11 +1064,18 @@ def input_parser(plan, input_args):
                 "additional_preloaded_contracts"
             ],
             additional_mnemonics=result["network_params"]["additional_mnemonics"],
+            shuffle_genesis_validators=result["network_params"][
+                "shuffle_genesis_validators"
+            ],
+            builder_count=result["network_params"]["builder_count"],
+            builder_balance=result["network_params"]["builder_balance"],
             devnet_repo=result["network_params"]["devnet_repo"],
             prefunded_accounts=result["network_params"]["prefunded_accounts"],
             max_payload_size=result["network_params"]["max_payload_size"],
             perfect_peerdas_enabled=result["network_params"]["perfect_peerdas_enabled"],
             gas_limit=result["network_params"]["gas_limit"],
+            gas_limit_schedule=result["network_params"]["gas_limit_schedule"],
+            slot_duration_ms_heze=result["network_params"]["slot_duration_ms_heze"],
             withdrawal_type=result["network_params"]["withdrawal_type"],
             withdrawal_address=result["network_params"]["withdrawal_address"],
             validator_balance=result["network_params"]["validator_balance"],
@@ -724,44 +1083,49 @@ def input_parser(plan, input_args):
                 "min_epochs_for_data_column_sidecars_requests"
             ],
         ),
-        mev_params=struct(
-            mev_relay_image=result["mev_params"]["mev_relay_image"],
-            mev_builder_image=result["mev_params"]["mev_builder_image"],
-            mev_builder_cl_image=result["mev_params"]["mev_builder_cl_image"],
-            mev_builder_extra_data=result["mev_params"]["mev_builder_extra_data"],
-            mev_builder_subsidy=result["mev_params"]["mev_builder_subsidy"],
-            mev_boost_image=result["mev_params"]["mev_boost_image"],
-            mev_boost_args=result["mev_params"]["mev_boost_args"],
-            mev_relay_api_extra_args=result["mev_params"]["mev_relay_api_extra_args"],
-            mev_relay_api_extra_env_vars=result["mev_params"][
-                "mev_relay_api_extra_env_vars"
-            ],
-            mev_relay_housekeeper_extra_args=result["mev_params"][
-                "mev_relay_housekeeper_extra_args"
-            ],
-            mev_relay_housekeeper_extra_env_vars=result["mev_params"][
-                "mev_relay_housekeeper_extra_env_vars"
-            ],
-            mev_relay_website_extra_args=result["mev_params"][
-                "mev_relay_website_extra_args"
-            ],
-            mev_relay_website_extra_env_vars=result["mev_params"][
-                "mev_relay_website_extra_env_vars"
-            ],
-            mev_builder_extra_args=result["mev_params"]["mev_builder_extra_args"],
-            mev_builder_cl_extra_params=result["mev_params"][
-                "mev_builder_cl_extra_params"
-            ],
-            mev_builder_prometheus_config=result["mev_params"][
-                "mev_builder_prometheus_config"
-            ],
-            mock_mev_image=result["mev_params"]["mock_mev_image"],
-            launch_adminer=result["mev_params"]["launch_adminer"],
-            run_multiple_relays=result["mev_params"]["run_multiple_relays"],
-            helix_relay_image=result["mev_params"]["helix_relay_image"],
-        )
-        if result["mev_params"]
-        else None,
+        mev_params=(
+            struct(
+                mev_relay_image=result["mev_params"]["mev_relay_image"],
+                mev_builder_image=result["mev_params"]["mev_builder_image"],
+                mev_builder_cl_image=result["mev_params"]["mev_builder_cl_image"],
+                mev_builder_extra_data=result["mev_params"]["mev_builder_extra_data"],
+                mev_builder_subsidy=result["mev_params"]["mev_builder_subsidy"],
+                mev_boost_image=result["mev_params"]["mev_boost_image"],
+                mev_boost_args=result["mev_params"]["mev_boost_args"],
+                mev_relay_api_extra_args=result["mev_params"][
+                    "mev_relay_api_extra_args"
+                ],
+                mev_relay_api_extra_env_vars=result["mev_params"][
+                    "mev_relay_api_extra_env_vars"
+                ],
+                mev_relay_housekeeper_extra_args=result["mev_params"][
+                    "mev_relay_housekeeper_extra_args"
+                ],
+                mev_relay_housekeeper_extra_env_vars=result["mev_params"][
+                    "mev_relay_housekeeper_extra_env_vars"
+                ],
+                mev_relay_website_extra_args=result["mev_params"][
+                    "mev_relay_website_extra_args"
+                ],
+                mev_relay_website_extra_env_vars=result["mev_params"][
+                    "mev_relay_website_extra_env_vars"
+                ],
+                mev_builder_extra_args=result["mev_params"]["mev_builder_extra_args"],
+                mev_builder_cl_extra_params=result["mev_params"][
+                    "mev_builder_cl_extra_params"
+                ],
+                mev_builder_prometheus_config=result["mev_params"][
+                    "mev_builder_prometheus_config"
+                ],
+                mock_mev_image=result["mev_params"]["mock_mev_image"],
+                launch_adminer=result["mev_params"]["launch_adminer"],
+                run_multiple_relays=result["mev_params"]["run_multiple_relays"],
+                helix_relay_image=result["mev_params"]["helix_relay_image"],
+                commit_boost_config=result["mev_params"].get("commit_boost_config", ""),
+            )
+            if result["mev_params"]
+            else None
+        ),
         blockscout_params=struct(
             image=result["blockscout_params"]["image"],
             verif_image=result["blockscout_params"]["verif_image"],
@@ -823,18 +1187,12 @@ def input_parser(plan, input_args):
             image=result["grafana_params"]["image"],
         ),
         tempo_params=struct(
-            retention_duration=result["tempo_params"]["retention_duration"],
-            ingestion_rate_limit=result["tempo_params"]["ingestion_rate_limit"],
-            ingestion_burst_limit=result["tempo_params"]["ingestion_burst_limit"],
-            max_search_duration=result["tempo_params"]["max_search_duration"],
-            max_bytes_per_trace=result["tempo_params"]["max_bytes_per_trace"],
             min_cpu=result["tempo_params"]["min_cpu"],
             max_cpu=result["tempo_params"]["max_cpu"],
             min_mem=result["tempo_params"]["min_mem"],
             max_mem=result["tempo_params"]["max_mem"],
             image=result["tempo_params"]["image"],
         ),
-        apache_port=result["apache_port"],
         nginx_port=result["nginx_port"],
         assertoor_params=struct(
             image=result["assertoor_params"]["image"],
@@ -852,11 +1210,6 @@ def input_parser(plan, input_args):
             ],
             tests=result["assertoor_params"]["tests"],
         ),
-        custom_flood_params=struct(
-            interval_between_transactions=result["custom_flood_params"][
-                "interval_between_transactions"
-            ],
-        ),
         spamoor_params=struct(
             image=result["spamoor_params"]["image"],
             min_cpu=result["spamoor_params"]["min_cpu"],
@@ -865,6 +1218,22 @@ def input_parser(plan, input_args):
             max_mem=result["spamoor_params"]["max_mem"],
             spammers=result["spamoor_params"]["spammers"],
             extra_args=result["spamoor_params"]["extra_args"],
+            start_chainload=result["spamoor_params"]["start_chainload"],
+            start_fuzzing=result["spamoor_params"]["start_fuzzing"],
+            defaults=result["spamoor_params"]["defaults"],
+        ),
+        disruptoor_params=struct(
+            image=result["disruptoor_params"]["image"],
+            min_cpu=result["disruptoor_params"]["min_cpu"],
+            max_cpu=result["disruptoor_params"]["max_cpu"],
+            min_mem=result["disruptoor_params"]["min_mem"],
+            max_mem=result["disruptoor_params"]["max_mem"],
+            log_level=result["disruptoor_params"]["log_level"],
+            log_format=result["disruptoor_params"]["log_format"],
+            config=result["disruptoor_params"]["config"],
+            partitions=result["disruptoor_params"]["partitions"],
+            shaping=result["disruptoor_params"]["shaping"],
+            extra_args=result["disruptoor_params"]["extra_args"],
         ),
         slashoor_params=struct(
             image=result["slashoor_params"]["image"],
@@ -969,14 +1338,14 @@ def input_parser(plan, input_args):
             max_cpu=result["bootnodoor_params"]["max_cpu"],
             min_mem=result["bootnodoor_params"]["min_mem"],
             max_mem=result["bootnodoor_params"]["max_mem"],
+            separate_keys=result["bootnodoor_params"]["separate_keys"],
             extra_args=result["bootnodoor_params"]["extra_args"],
         ),
         zkboost_params=struct(
             image=result["zkboost_params"]["image"],
-            witness_timeout_secs=result["zkboost_params"]["witness_timeout_secs"],
-            proof_timeout_secs=result["zkboost_params"]["proof_timeout_secs"],
-            witness_cache_size=result["zkboost_params"]["witness_cache_size"],
-            proof_cache_size=result["zkboost_params"]["proof_cache_size"],
+            dashboard_enabled="grafana" in result["additional_services"]
+            or "prometheus_grafana" in result["additional_services"],
+            instances=result["zkboost_params"]["instances"],
             zkvms=result["zkboost_params"]["zkvms"],
             env=result["zkboost_params"]["env"],
         ),
@@ -985,8 +1354,84 @@ def input_parser(plan, input_args):
             extra_args=result["buildoor_params"]["extra_args"],
             builder_api=result["buildoor_params"]["builder_api"],
             epbs_builder=result["buildoor_params"]["epbs_builder"],
+            lifecycle=result["buildoor_params"]["lifecycle"],
+            instances=[
+                struct(
+                    participant=instance["participant"],
+                    count=instance.get("count", 1),
+                    # Optional per-instance image override (A/B testing). None =>
+                    # fall back to buildoor_params.image at launch time.
+                    image=instance.get("image", None),
+                )
+                for instance in result["buildoor_params"]["instances"]
+            ],
+        ),
+        trueblocks_params=struct(
+            image=result["trueblocks_params"]["image"],
+            config_version=result["trueblocks_params"]["config_version"],
+            target_rpc_url=result["trueblocks_params"]["target_rpc_url"],
+            target_index=result["trueblocks_params"]["target_index"],
+            scrape=struct(
+                apps_per_chunk=result["trueblocks_params"]["scrape"]["apps_per_chunk"],
+                snap_to_grid=result["trueblocks_params"]["scrape"]["snap_to_grid"],
+                first_snap=result["trueblocks_params"]["scrape"]["first_snap"],
+                unripe_dist=result["trueblocks_params"]["scrape"]["unripe_dist"],
+            ),
+            env=result["trueblocks_params"]["env"],
         ),
     )
+
+
+def _validate_ere_gpu_config(zkvms):
+    services_using_count = []
+    gpu_device_usage = {}  # device_id -> proof_type
+
+    for zkvm in zkvms:
+        if zkvm.get("kind") != "ere":
+            continue
+
+        proof_type = zkvm.get("proof_type")
+        gpu_cfg = zkvm.get("gpu", {})
+        count = gpu_cfg.get("count", 0)
+        device_ids = gpu_cfg.get("device_ids", [])
+        has_gpu = len(device_ids) > 0 or count > 0
+
+        # Check: ere requires GPU
+        # Pre-built ere-server images are CUDA-enabled and require GPU for proving.
+        if not has_gpu:
+            fail(
+                "proof_type '{0}' has kind=ere but no GPU configured. ".format(
+                    proof_type
+                )
+                + "ere-server requires GPU for proving. "
+                + "Either add gpu.device_ids or gpu.count, or set endpoint to connect to a running ere-server."
+            )
+
+        # Check: GPU device_id overlap
+        for device_id in device_ids:
+            if device_id in gpu_device_usage:
+                fail(
+                    "GPU device '{0}' is used by multiple ere entries: '{1}' and '{2}'. ".format(
+                        device_id, gpu_device_usage[device_id], proof_type
+                    )
+                    + "Each ere-server requires exclusive GPU access."
+                )
+            gpu_device_usage[device_id] = proof_type
+
+        if count > 0 and len(device_ids) == 0:
+            services_using_count.append(proof_type)
+
+    # Check: Multiple services using gpu.count without device_ids
+    if len(services_using_count) > 1:
+        fail(
+            "Multiple ere services specify gpu.count without gpu.device_ids: [{0}]. ".format(
+                ", ".join(services_using_count)
+            )
+            + "Docker assigns GPUs from the same pool when gpu.count is used, so all services "
+            + "requesting GPUs this way will receive the same device(s). "
+            + "Use gpu.device_ids to explicitly assign distinct GPU(s) to each service instead "
+            + '(e.g. gpu: {{device_ids: ["0"]}} and gpu: {{device_ids: ["1"]}}).'
+        )
 
 
 def parse_network_params(plan, input_args):
@@ -1007,18 +1452,29 @@ def parse_network_params(plan, input_args):
         vc_matrix = []
         if "vc" in input_args["participants_matrix"]:
             vc_matrix = input_args["participants_matrix"]["vc"]
+        remote_signer_matrix = []
+        if "remote_signer" in input_args["participants_matrix"]:
+            remote_signer_matrix = input_args["participants_matrix"]["remote_signer"]
         count = input_args["participants_matrix"].get("count", 1)
 
         for el in el_matrix:
             for cl in cl_matrix:
                 for vc in vc_matrix if vc_matrix else [{}]:
-                    for _ in range(count):
-                        participant = {k: v for k, v in el.items()}
-                        for k, v in cl.items():
-                            participant[k] = v
-                        for k, v in vc.items():
-                            participant[k] = v
-                        participants.append(participant)
+                    for remote_signer in (
+                        remote_signer_matrix if remote_signer_matrix else [{}]
+                    ):
+                        for _ in range(count):
+                            participant = {k: v for k, v in el.items()}
+                            for k, v in cl.items():
+                                participant[k] = v
+                            for k, v in vc.items():
+                                participant[k] = v
+                            for k, v in remote_signer.items():
+                                participant[k] = v
+                            # Defining a remote_signer matrix entry implies using it.
+                            if remote_signer:
+                                participant["use_remote_signer"] = True
+                            participants.append(participant)
 
         if "participants" in input_args:
             input_args["participants"].extend(participants)
@@ -1040,21 +1496,17 @@ def parse_network_params(plan, input_args):
                 max_key = "bpo_{}_max_blobs".format(bpo_num)
                 target_key = "bpo_{}_target_blobs".format(bpo_num)
 
-                # If only max is set (non-zero), calculate target as 2/3 of max (rounded)
-                if result["network_params"].get(max_key) and not result[
-                    "network_params"
-                ].get(target_key):
+                max_set = bool(input_args["network_params"].get(max_key))
+                target_set = bool(input_args["network_params"].get(target_key))
+                if max_set and not target_set:
                     result["network_params"][target_key] = int(
                         result["network_params"][max_key] * 2.0 / 3.0 + 0.5
                     )
-                # If only target is set (non-zero), calculate max as target * 3/2 (rounded)
-                elif result["network_params"].get(target_key) and not result[
-                    "network_params"
-                ].get(max_key):
+                elif target_set and not max_set:
                     result["network_params"][max_key] = int(
                         result["network_params"][target_key] * 3.0 / 2.0 + 0.5
                     )
-                # If both are set or both are 0, don't override
+
         elif attr == "participants":
             participants = []
             for participant in input_args["participants"]:
@@ -1067,6 +1519,14 @@ def parse_network_params(plan, input_args):
                     participants.append(participant_copy)
             result["participants"] = participants
 
+    # When GLOAS is scheduled, default the gas limits to 200M unless the user set them explicitly.
+    if result["network_params"]["gloas_fork_epoch"] != constants.FAR_FUTURE_EPOCH:
+        user_network_params = input_args.get("network_params", {})
+        if "genesis_gaslimit" not in user_network_params:
+            result["network_params"]["genesis_gaslimit"] = 200000000
+        if "gas_limit" not in user_network_params:
+            result["network_params"]["gas_limit"] = 200000000
+
     if "snooper_params" in input_args:
         for sub_attr in input_args["snooper_params"]:
             result["snooper_params"][sub_attr] = input_args["snooper_params"][sub_attr]
@@ -1076,6 +1536,9 @@ def parse_network_params(plan, input_args):
     # validation of the above defaults
     for index, participant in enumerate(result["participants"]):
         el_type = participant["el_type"]
+        if el_type == None or el_type in ("None", "null", "Null"):
+            participant["el_type"] = constants.EL_TYPE.none
+            el_type = constants.EL_TYPE.none
         cl_type = participant["cl_type"]
         vc_type = participant["vc_type"]
         remote_signer_type = participant["remote_signer_type"]
@@ -1103,7 +1566,7 @@ def parse_network_params(plan, input_args):
             )
 
         el_image = participant["el_image"]
-        if el_image == "":
+        if el_image == "" and el_type != constants.EL_TYPE.none:
             # Get devnet-modified images if network contains 'devnet'
             effective_el_images = get_devnet_modified_images(
                 result["network_params"]["network"], DEFAULT_EL_IMAGES
@@ -1293,6 +1756,13 @@ def parse_network_params(plan, input_args):
     if result["network_params"]["seconds_per_slot"] == 0:
         fail("seconds_per_slot is 0 needs to be > 0 ")
 
+    if result["network_params"]["slot_duration_ms"] < 1000:
+        fail(
+            "slot_duration_ms is {0}, it needs to be at least 1000 (sub-second slots are not supported)".format(
+                result["network_params"]["slot_duration_ms"]
+            )
+        )
+
     seconds_per_slot = result["network_params"]["seconds_per_slot"]
     slot_duration_ms = result["network_params"]["slot_duration_ms"]
     preset = result["network_params"]["preset"]
@@ -1333,6 +1803,29 @@ def parse_network_params(plan, input_args):
             + result["network_params"]["preset"]
             + " is not supported, it can only be mainnet or minimal"
         )
+
+    if result["network_params"]["builder_count"] > 0:
+        if result["network_params"]["gloas_fork_epoch"] != 0:
+            fail(
+                "builder_count is {0} but gloas_fork_epoch is {1}. Builders are only supported when gloas_fork_epoch is 0 (GLOAS at genesis).".format(
+                    result["network_params"]["builder_count"],
+                    result["network_params"]["gloas_fork_epoch"],
+                )
+            )
+        builder_mnemonic_entry = {
+            "mnemonic": result["network_params"]["builder_keys_mnemonic"],
+            "start": 0,
+            "count": result["network_params"]["builder_count"],
+            "wd_prefix": "0xB0",
+            "wd_address": result["network_params"]["withdrawal_address"],
+        }
+        if result["network_params"]["builder_balance"] > 0:
+            builder_mnemonic_entry["balance"] = int(
+                result["network_params"]["builder_balance"] * 1000000000
+            )
+        result["network_params"]["additional_mnemonics"] = result["network_params"][
+            "additional_mnemonics"
+        ] + [builder_mnemonic_entry]
 
     return result
 
@@ -1398,8 +1891,8 @@ def default_input_args(input_args):
         "persistent": False,
         "mev_type": None,
         "xatu_sentry_enabled": False,
-        "apache_port": None,
-        "nginx_port": None,
+        "apache_port": None,  # backwards-compat: silently mapped to nginx_port
+        "nginx_port": 9090,
         "global_tolerations": [],
         "global_node_selectors": {},
         "use_remote_signer": False,
@@ -1413,6 +1906,7 @@ def default_input_args(input_args):
         },
         "snooper_params": get_default_snooper_params(),
         "spamoor_params": get_default_spamoor_params(),
+        "disruptoor_params": get_default_disruptoor_params(),
         "bootnodoor_params": get_default_bootnodoor_params(),
     }
 
@@ -1432,19 +1926,21 @@ def default_network_params():
         "genesis_gaslimit": 60000000,
         "max_per_epoch_activation_churn_limit": 8,
         "churn_limit_quotient": 65536,
+        "confirmation_byzantine_threshold": 25,
         "ejection_balance": 16000000000,
         "eth1_follow_distance": 2048,
         "min_validator_withdrawability_delay": 256,
         "min_builder_withdrawability_delay": 64,
+        "deploy_eip8282_contracts": True,
         "shard_committee_period": 256,
         "attestation_due_bps_gloas": 2500,
         "aggregate_due_bps_gloas": 5000,
         "sync_message_due_bps_gloas": 2500,
         "contribution_due_bps_gloas": 5000,
+        "payload_due_bps": 5000,
         "payload_attestation_due_bps": 7500,
         "view_freeze_cutoff_bps": 7500,
-        "inclusion_list_submission_due_bps": 6667,
-        "proposer_inclusion_list_cutoff_bps": 9167,
+        "inclusion_list_due_bps": 7500,
         "altair_fork_epoch": 0,
         "bellatrix_fork_epoch": 0,
         "capella_fork_epoch": 0,
@@ -1453,6 +1949,7 @@ def default_network_params():
         "fulu_fork_epoch": 0,
         "gloas_fork_epoch": constants.FAR_FUTURE_EPOCH,
         "heze_fork_epoch": constants.FAR_FUTURE_EPOCH,
+        "frames_enabled": False,
         "network_sync_base_url": "https://snapshots.ethpandaops.io/",
         "force_snapshot_sync": False,
         "shadowfork_block_height": "latest",
@@ -1465,35 +1962,41 @@ def default_network_params():
         "preset": "mainnet",
         "additional_preloaded_contracts": {},
         "additional_mnemonics": [],
+        "shuffle_genesis_validators": False,
         "devnet_repo": "ethpandaops",
         "prefunded_accounts": {},
         "max_payload_size": 10485760,
         "perfect_peerdas_enabled": False,
         "gas_limit": 0,
+        "gas_limit_schedule": [],
+        "slot_duration_ms_heze": 12000,
         "bpo_1_epoch": 0,
         "bpo_1_max_blobs": 15,
         "bpo_1_target_blobs": 10,
         "bpo_1_base_fee_update_fraction": 8346193,
-        "bpo_2_epoch": 18446744073709551615,
+        "bpo_2_epoch": 0,
         "bpo_2_max_blobs": 21,
         "bpo_2_target_blobs": 14,
         "bpo_2_base_fee_update_fraction": 11684671,
         "bpo_3_epoch": 18446744073709551615,
-        "bpo_3_max_blobs": 0,
-        "bpo_3_target_blobs": 0,
+        "bpo_3_max_blobs": 33,
+        "bpo_3_target_blobs": 22,
         "bpo_3_base_fee_update_fraction": 0,
         "bpo_4_epoch": 18446744073709551615,
-        "bpo_4_max_blobs": 0,
-        "bpo_4_target_blobs": 0,
+        "bpo_4_max_blobs": 48,
+        "bpo_4_target_blobs": 32,
         "bpo_4_base_fee_update_fraction": 0,
         "bpo_5_epoch": 18446744073709551615,
-        "bpo_5_max_blobs": 0,
-        "bpo_5_target_blobs": 0,
+        "bpo_5_max_blobs": 72,
+        "bpo_5_target_blobs": 48,
         "bpo_5_base_fee_update_fraction": 0,
         "withdrawal_type": "0x00",
         "withdrawal_address": "0x8943545177806ED17B9F23F0a21ee5948eCaa776",
         "validator_balance": 32,
         "min_epochs_for_data_column_sidecars_requests": 4096,
+        "builder_count": 0,
+        "builder_balance": 100,
+        "builder_keys_mnemonic": constants.DEFAULT_BUILDER_MNEMONIC,
     }
 
 
@@ -1512,19 +2015,21 @@ def default_minimal_network_params():
         "genesis_gaslimit": 60000000,
         "max_per_epoch_activation_churn_limit": 4,
         "churn_limit_quotient": 32,
+        "confirmation_byzantine_threshold": 25,
         "ejection_balance": 16000000000,
         "eth1_follow_distance": 16,
         "min_validator_withdrawability_delay": 256,
         "min_builder_withdrawability_delay": 2,
+        "deploy_eip8282_contracts": True,
         "shard_committee_period": 64,
         "attestation_due_bps_gloas": 2500,
         "aggregate_due_bps_gloas": 5000,
         "sync_message_due_bps_gloas": 2500,
         "contribution_due_bps_gloas": 5000,
+        "payload_due_bps": 5000,
         "payload_attestation_due_bps": 7500,
         "view_freeze_cutoff_bps": 7500,
-        "inclusion_list_submission_due_bps": 6667,
-        "proposer_inclusion_list_cutoff_bps": 9167,
+        "inclusion_list_due_bps": 7500,
         "altair_fork_epoch": 0,
         "bellatrix_fork_epoch": 0,
         "capella_fork_epoch": 0,
@@ -1533,6 +2038,7 @@ def default_minimal_network_params():
         "fulu_fork_epoch": 0,
         "gloas_fork_epoch": constants.FAR_FUTURE_EPOCH,
         "heze_fork_epoch": constants.FAR_FUTURE_EPOCH,
+        "frames_enabled": False,
         "network_sync_base_url": "https://snapshots.ethpandaops.io/",
         "force_snapshot_sync": False,
         "shadowfork_block_height": "latest",
@@ -1545,35 +2051,41 @@ def default_minimal_network_params():
         "preset": "minimal",
         "additional_preloaded_contracts": {},
         "additional_mnemonics": [],
+        "shuffle_genesis_validators": False,
         "devnet_repo": "ethpandaops",
         "prefunded_accounts": {},
         "max_payload_size": 10485760,
         "perfect_peerdas_enabled": False,
         "gas_limit": 0,
+        "gas_limit_schedule": [],
+        "slot_duration_ms_heze": 6000,
         "bpo_1_epoch": 0,
         "bpo_1_max_blobs": 15,
         "bpo_1_target_blobs": 10,
         "bpo_1_base_fee_update_fraction": 8346193,
-        "bpo_2_epoch": 18446744073709551615,
+        "bpo_2_epoch": 0,
         "bpo_2_max_blobs": 21,
         "bpo_2_target_blobs": 14,
         "bpo_2_base_fee_update_fraction": 11684671,
         "bpo_3_epoch": 18446744073709551615,
-        "bpo_3_max_blobs": 0,
-        "bpo_3_target_blobs": 0,
+        "bpo_3_max_blobs": 33,
+        "bpo_3_target_blobs": 22,
         "bpo_3_base_fee_update_fraction": 0,
         "bpo_4_epoch": 18446744073709551615,
-        "bpo_4_max_blobs": 0,
-        "bpo_4_target_blobs": 0,
+        "bpo_4_max_blobs": 48,
+        "bpo_4_target_blobs": 32,
         "bpo_4_base_fee_update_fraction": 0,
         "bpo_5_epoch": 18446744073709551615,
-        "bpo_5_max_blobs": 0,
-        "bpo_5_target_blobs": 0,
+        "bpo_5_max_blobs": 72,
+        "bpo_5_target_blobs": 48,
         "bpo_5_base_fee_update_fraction": 0,
         "withdrawal_type": "0x00",
         "withdrawal_address": "0x8943545177806ED17B9F23F0a21ee5948eCaa776",
         "validator_balance": 32,
         "min_epochs_for_data_column_sidecars_requests": 4096,
+        "builder_count": 0,
+        "builder_balance": 100,
+        "builder_keys_mnemonic": constants.DEFAULT_BUILDER_MNEMONIC,
     }
 
 
@@ -1684,6 +2196,25 @@ def get_default_dora_params():
     }
 
 
+def get_default_trueblocks_params():
+    return {
+        "image": constants.DEFAULT_TRUEBLOCKS_IMAGE,
+        "config_version": "v5.0.0",
+        "target_rpc_url": "",
+        "target_index": 0,
+        # 0 means "use the network-aware default". These end up in the rendered
+        # trueBlocks.toml and govern any future `chifra scrape` invocations
+        # (e.g. via the POST /scrape API).
+        "scrape": {
+            "apps_per_chunk": 0,
+            "snap_to_grid": 0,
+            "first_snap": 0,
+            "unripe_dist": 0,
+        },
+        "env": {},
+    }
+
+
 def get_default_checkpointz_params():
     return {
         "image": constants.DEFAULT_CHECKPOINTZ_IMAGE,
@@ -1770,9 +2301,9 @@ def get_default_mev_params(mev_type, preset):
     return {
         "mev_relay_image": mev_relay_image,
         "mev_builder_image": mev_builder_image,
-        "mock_mev_image": mev_builder_image
-        if mev_type == constants.MOCK_MEV_TYPE
-        else None,
+        "mock_mev_image": (
+            mev_builder_image if mev_type == constants.MOCK_MEV_TYPE else None
+        ),
         "mev_builder_subsidy": mev_builder_subsidy,
         "mev_builder_cl_image": mev_builder_cl_image,
         "mev_builder_extra_data": mev_builder_extra_data,
@@ -1790,6 +2321,7 @@ def get_default_mev_params(mev_type, preset):
         "launch_adminer": launch_adminer,
         "run_multiple_relays": False,
         "helix_relay_image": constants.DEFAULT_HELIX_RELAY_IMAGE,
+        "commit_boost_config": "",
     }
 
 
@@ -1860,11 +2392,6 @@ def get_default_grafana_params():
 
 def get_default_tempo_params():
     return {
-        "retention_duration": "12h",
-        "ingestion_rate_limit": 20971520,  # 20MB
-        "ingestion_burst_limit": 52428800,  # 50MB
-        "max_search_duration": "30s",
-        "max_bytes_per_trace": 52428800,  # 50MB
         "min_cpu": 10,
         "max_cpu": 1000,
         "min_mem": 128,
@@ -1912,6 +2439,12 @@ def get_default_spamoor_params():
         "min_mem": 100,
         "max_mem": 800,
         "extra_args": [],
+        # start spamoor's built-in "Regular Chain Load" default group on first launch
+        "start_chainload": True,
+        # start spamoor's built-in "Fuzzing" default group on first launch
+        "start_fuzzing": False,
+        # additional built-in defaults (by technical key) to start on first launch
+        "defaults": [],
         "spammers": [
             # default spammers
             {
@@ -1930,7 +2463,7 @@ def get_default_spamoor_params():
                 "description": "3 type-4 blob transactions per slot with 1-2 sidecars each, gas/blobgas limit 20 gwei",
                 "scenario": "blob-combined",
                 "config": {
-                    "throughput": 3,
+                    "throughput": 6,
                     "sidecars": 2,
                     "max_pending": 6,
                     "max_wallets": 20,
@@ -1939,6 +2472,22 @@ def get_default_spamoor_params():
                 },
             },
         ],
+    }
+
+
+def get_default_disruptoor_params():
+    return {
+        "image": constants.DEFAULT_DISRUPTOOR_IMAGE,
+        "min_cpu": 100,
+        "max_cpu": 1000,
+        "min_mem": 128,
+        "max_mem": 512,
+        "log_level": "info",
+        "log_format": "json",
+        "config": {},
+        "partitions": [],
+        "shaping": [],
+        "extra_args": [],
     }
 
 
@@ -1964,11 +2513,6 @@ def get_default_slashoor_params():
     }
 
 
-def get_default_custom_flood_params():
-    # this is a simple script that increases the balance of the coinbase address at a cadence
-    return {"interval_between_transactions": 1}
-
-
 def get_default_mempool_bridge_params():
     return {
         "image": "ethpandaops/mempool-bridge:latest",
@@ -1988,6 +2532,7 @@ def get_default_bootnodoor_params():
         "max_cpu": 1000,
         "min_mem": 128,
         "max_mem": 512,
+        "separate_keys": False,
         "extra_args": [],
     }
 
@@ -1995,10 +2540,7 @@ def get_default_bootnodoor_params():
 def get_default_zkboost_params():
     return {
         "image": constants.DEFAULT_ZKBOOST_IMAGE,
-        "witness_timeout_secs": 12,
-        "proof_timeout_secs": 12,
-        "witness_cache_size": 128,
-        "proof_cache_size": 128,
+        "instances": [{"name": "zkboost"}],
         "zkvms": [],
         "env": {},
     }
@@ -2010,6 +2552,16 @@ def get_default_buildoor_params():
         "extra_args": [],
         "builder_api": True,
         "epbs_builder": True,
+        # Enable buildoor's builder lifecycle (it deposits/onboards its own
+        # builder after genesis and tops it up), so builders work even when gloas
+        # is not at genesis. Requires the EL RPC + wallet key, both already wired.
+        "lifecycle": True,
+        # List of {participant: <1-based index>, count: <n>} entries. Each entry
+        # spins up `count` dedicated buildoor builder instances wired to that
+        # participant's CL/EL. Builders are independent of the participants - a
+        # builder reads one CL's payload_attributes stream and (in ePBS) gossips
+        # bids to the whole network. Empty => no per-participant buildoors.
+        "instances": [],
     }
 
 
@@ -2085,6 +2637,107 @@ def enrich_disable_peer_scoring(parsed_arguments_dict):
     return parsed_arguments_dict
 
 
+# Wire the CL (and VC) of a single participant to an external builder/relay at
+# mev_url. Shared by the global mev_type flow and the per-participant buildoor
+# flow so both stay in sync as new clients are added.
+def apply_external_builder_flags(participant, mev_url, gas_limit):
+    if participant["cl_type"] == "lighthouse":
+        participant["cl_extra_params"].append("--builder={0}".format(mev_url))
+    if participant["vc_type"] == "lighthouse":
+        if (
+            gas_limit == 0
+        ):  # if the gas limit is set we already enable builder-proposals
+            participant["vc_extra_params"].append("--builder-proposals")
+    if participant["cl_type"] == "lodestar":
+        participant["cl_extra_params"].append("--builder")
+        participant["cl_extra_params"].append("--builder.urls={0}".format(mev_url))
+    if participant["vc_type"] == "lodestar":
+        participant["vc_extra_params"].append("--builder")
+    if participant["cl_type"] == "nimbus":
+        participant["cl_extra_params"].append("--payload-builder=true")
+        participant["cl_extra_params"].append(
+            "--payload-builder-url={0}".format(mev_url)
+        )
+    if participant["vc_type"] == "nimbus":
+        participant["vc_extra_params"].append("--payload-builder=true")
+    if participant["cl_type"] == "teku":
+        participant["cl_extra_params"].append("--builder-endpoint={0}".format(mev_url))
+        participant["cl_extra_params"].append(
+            "--validators-builder-registration-default-enabled=true"
+        )
+    if participant["vc_type"] == "teku":
+        participant["vc_extra_params"].append(
+            "--validators-builder-registration-default-enabled=true"
+        )
+    if participant["cl_type"] == "prysm":
+        participant["cl_extra_params"].append("--http-mev-relay={0}".format(mev_url))
+    if participant["vc_type"] == "prysm":
+        participant["vc_extra_params"].append("--enable-builder")
+    if participant["cl_type"] == "grandine":
+        participant["cl_extra_params"].append("--builder-url={0}".format(mev_url))
+    if participant["vc_type"] == "vero":
+        participant["vc_extra_params"].append("--use-external-builder")
+
+
+# buildoor builds a payload from the CL's payload_attributes SSE stream, so the
+# CL feeding a buildoor instance must emit them on every slot.
+def apply_buildoor_payload_attributes_flags(participant):
+    if participant["cl_type"] == "lodestar":
+        participant["cl_extra_params"].append("--emitPayloadAttributes=true")
+    elif participant["cl_type"] == "prysm":
+        participant["cl_extra_params"].append("--prepare-all-payloads")
+    elif participant["cl_type"] == "lighthouse":
+        participant["cl_extra_params"].append("--always-prepare-payload")
+    elif participant["cl_type"] == "grandine":
+        participant["cl_extra_params"].append(
+            "--features=AlwaysPrepareExecutionPayload"
+        )
+    elif participant["cl_type"] == "consensoor":
+        participant["cl_extra_params"].append("--emit-payload-attributes")
+    elif participant["cl_type"] == "teku":
+        participant["cl_extra_params"].append(
+            "--Xfork-choice-updated-always-send-payload-attributes=true"
+        )
+    elif participant["cl_type"] == "nimbus":
+        # nimbus does not require flags to emit payload_attributes.
+        pass
+
+
+# Per-participant buildoor: each buildoor_params.instances entry spins up
+# `count` dedicated buildoor services wired to the named participant's CL/EL.
+# Builders are configured independently of the participants (a builder reads one
+# CL's payload_attributes stream and, in ePBS, gossips bids to the whole
+# network). This is independent of the global mev_type buildoor flow (a single
+# shared buildoor for the whole network).
+def enrich_buildoor_per_participant(parsed_arguments_dict):
+    participants = parsed_arguments_dict["participants"]
+    gas_limit = parsed_arguments_dict["network_params"]["gas_limit"]
+    num_participants = len(participants)
+    for instance in parsed_arguments_dict["buildoor_params"]["instances"]:
+        index = instance["participant"] - 1
+        count = instance.get("count", 1)
+        participant = participants[index]
+        index_str = shared_utils.zfill_custom(index + 1, len(str(num_participants)))
+        # The CL has a single external-builder endpoint, so it is wired to the
+        # participant's first buildoor instance. Any additional instances still
+        # spin up (e.g. competing ePBS builders) but are not the CL's builder.
+        service_name = shared_utils.get_buildoor_service_name(
+            constants.BUILDOOR_SERVICE_NAME,
+            participant["cl_type"],
+            participant["el_type"],
+            index_str,
+            0,
+            count,
+        )
+        mev_url = "http://{0}:{1}".format(
+            service_name,
+            constants.BUILDOOR_API_PORT,
+        )
+        apply_external_builder_flags(participant, mev_url, gas_limit)
+        apply_buildoor_payload_attributes_flags(participant)
+    return parsed_arguments_dict
+
+
 # TODO perhaps clean this up into a map
 def enrich_mev_extra_params(parsed_arguments_dict, mev_prefix, mev_port, mev_type):
     for index, participant in enumerate(parsed_arguments_dict["participants"]):
@@ -2097,55 +2750,34 @@ def enrich_mev_extra_params(parsed_arguments_dict, mev_prefix, mev_port, mev_typ
         else:
             prefix = constants.MEV_BOOST_SERVICE_NAME_PREFIX
 
-        mev_url = "http://{0}-{1}-{2}-{3}:{4}".format(
-            prefix,
-            index_str,
-            participant["cl_type"],
-            participant["el_type"],
-            mev_port,
+        if mev_type == constants.BUILDOOR_MEV_TYPE:
+            # buildoor is a single shared builder service that the CLs contact
+            # directly (no per-participant mev-boost sidecar). This is required for
+            # the Gloas builder API (execution_payload_bid / builder_preferences /
+            # beacon_block), which mev-boost does not proxy.
+            mev_url = "http://{0}:{1}".format(
+                constants.BUILDOOR_SERVICE_NAME,
+                constants.BUILDOOR_API_PORT,
+            )
+        else:
+            mev_url = "http://{0}-{1}-{2}-{3}:{4}".format(
+                prefix,
+                index_str,
+                participant["cl_type"],
+                participant["el_type"],
+                mev_port,
+            )
+
+        apply_external_builder_flags(
+            participant,
+            mev_url,
+            parsed_arguments_dict["network_params"]["gas_limit"],
         )
 
-        if participant["cl_type"] == "lighthouse":
-            participant["cl_extra_params"].append("--builder={0}".format(mev_url))
-        if participant["vc_type"] == "lighthouse":
-            if (
-                parsed_arguments_dict["network_params"]["gas_limit"] == 0
-            ):  # if the gas limit is set we already enable builder-proposals
-                participant["vc_extra_params"].append("--builder-proposals")
-        if participant["cl_type"] == "lodestar":
-            participant["cl_extra_params"].append("--builder")
-            participant["cl_extra_params"].append("--builder.urls={0}".format(mev_url))
-        if participant["vc_type"] == "lodestar":
-            participant["vc_extra_params"].append("--builder")
-        if participant["cl_type"] == "nimbus":
-            participant["cl_extra_params"].append("--payload-builder=true")
-            participant["cl_extra_params"].append(
-                "--payload-builder-url={0}".format(mev_url)
-            )
-        if participant["vc_type"] == "nimbus":
-            participant["vc_extra_params"].append("--payload-builder=true")
-        if participant["cl_type"] == "teku":
-            participant["cl_extra_params"].append(
-                "--builder-endpoint={0}".format(mev_url)
-            )
-            participant["cl_extra_params"].append(
-                "--validators-builder-registration-default-enabled=true"
-            )
-        if participant["vc_type"] == "teku":
-            participant["vc_extra_params"].append(
-                "--validators-builder-registration-default-enabled=true"
-            )
-        if participant["cl_type"] == "prysm":
-            participant["cl_extra_params"].append(
-                "--http-mev-relay={0}".format(mev_url)
-            )
-        if participant["vc_type"] == "prysm":
-            participant["vc_extra_params"].append("--enable-builder")
-        if participant["cl_type"] == "grandine":
-            participant["cl_extra_params"].append("--builder-url={0}".format(mev_url))
-
-        if participant["vc_type"] == "vero":
-            participant["vc_extra_params"].append("--use-external-builder")
+        # buildoor builds against the first participant's payload_attributes
+        # SSE stream, so that CL must emit them on every slot.
+        if mev_type == constants.BUILDOOR_MEV_TYPE and index == 0:
+            apply_buildoor_payload_attributes_flags(participant)
 
         # Note: Charon enables the builder API via the CHARON_BUILDER_API env var
         # set in charon_launcher.star, not through vc_extra_params (those flow into
@@ -2261,7 +2893,9 @@ def docker_cache_image_override(plan, result):
         "grafana_params.image",
         "tempo_params.image",
         "spamoor_params.image",
+        "disruptoor_params.image",
         "ethereum_genesis_generator_params.image",
+        "trueblocks_params.image",
     ]
 
     if result["docker_cache_params"]["url"] == "":

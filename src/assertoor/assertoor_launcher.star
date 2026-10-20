@@ -69,8 +69,8 @@ def launch_assertoor(
 
         client_info = new_client_info(
             cl_client.beacon_http_url,
-            el_client.dns_name,
-            el_client.rpc_port_num,
+            el_client.dns_name if el_client != None else "",
+            el_client.rpc_port_num if el_client != None else 0,
             participant.snooper_el_engine_context,
             participant.snooper_beacon_context,
             full_name,
@@ -140,22 +140,6 @@ def get_config(
     )
 
     IMAGE_NAME = assertoor_params.image
-    default_assertoor_image = (
-        docker_cache_params.url
-        + (docker_cache_params.dockerhub_prefix if docker_cache_params.enabled else "")
-        + constants.DEFAULT_ASSERTOOR_IMAGE
-    )
-    if assertoor_params.image == default_assertoor_image:
-        if network_params.gloas_fork_epoch < constants.FAR_FUTURE_EPOCH:
-            IMAGE_NAME = (
-                docker_cache_params.url
-                + (
-                    docker_cache_params.dockerhub_prefix
-                    if docker_cache_params.enabled
-                    else ""
-                )
-                + "ethpandaops/assertoor:gloas-support"
-            )
 
     return ServiceConfig(
         image=IMAGE_NAME,
@@ -225,6 +209,7 @@ def new_client_info(
     el_snooper_url = ""
     cl_snooper_enabled = False
     cl_snooper_url = ""
+    cl_snooper_metrics_url = ""
 
     if el_snooper_context != None:
         el_snooper_enabled = True
@@ -238,6 +223,10 @@ def new_client_info(
             cl_snooper_context.dns_name,
             cl_snooper_context.beacon_rpc_port_num,
         )
+        cl_snooper_metrics_url = "http://{0}:{1}/metrics".format(
+            cl_snooper_context.dns_name,
+            cl_snooper_context.metrics_port_num,
+        )
 
     return {
         "CL_HTTP_URL": beacon_http_url,
@@ -247,5 +236,6 @@ def new_client_info(
         "ELSnooperUrl": el_snooper_url,
         "CLSnooperEnabled": cl_snooper_enabled,
         "CLSnooperUrl": cl_snooper_url,
+        "CLSnooperMetricsUrl": cl_snooper_metrics_url,
         "Name": full_name,
     }
