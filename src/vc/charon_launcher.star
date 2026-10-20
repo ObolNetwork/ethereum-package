@@ -83,6 +83,10 @@ def launch(
         vc_type = participant.charon_params.get("charon_vc", vc_type)
         vc_image = participant.charon_params.get("charon_vc_image", vc_image)
 
+    # Gloas builders charon requests bids from directly, identical on all charon
+    # nodes and their VCs, which sign the builders' request auths.
+    builder_config = _builder_config(participant.charon_params)
+
     # All Charon nodes connect to the same beacon node.
     beacon_endpoint = cl_context.beacon_http_url
 
@@ -216,6 +220,14 @@ def launch(
             "CHARON_TESTNET_NAME": "kurtosis",
         }
 
+        if builder_config != None:
+            env_vars["CHARON_BUILDER_URLS"] = ",".join(builder_config.urls)
+            env_vars["CHARON_BUILDER_MIN_BID"] = str(builder_config.min_bid)
+            env_vars["CHARON_BUILDER_BOOST_FACTOR"] = str(builder_config.boost_factor)
+            env_vars["CHARON_BUILDER_MAX_EXECUTION_PAYMENT"] = str(
+                builder_config.max_execution_payment
+            )
+
         # Add any extra environment variables
         if participant.vc_extra_env_vars:
             env_vars.update(participant.vc_extra_env_vars)
@@ -333,6 +345,7 @@ def launch(
                 vc_index=vc_index,
                 node_index=i,
                 vc_image=vc_image,
+                builder_config=builder_config,
             )
         )
 
@@ -523,6 +536,7 @@ def launch_lighthouse(
     vc_index,
     node_index,
     vc_image,
+    builder_config=None,
 ):
     node_keystore_files = _charon_split_keys_to_keystore_files(
         plan, split_keys_artifact, vc_index, node_index
@@ -549,6 +563,7 @@ def launch_lighthouse(
         vc_index=vc_index,
         extra_files_artifacts=[],
         distributed=True,
+        builder_config=builder_config,
     )
 
     return plan.add_service(name=vc_service_name, config=config)
@@ -572,6 +587,7 @@ def launch_lodestar(
     vc_index,
     node_index,
     vc_image,
+    builder_config=None,
 ):
     node_keystore_files = _charon_split_keys_to_keystore_files(
         plan, split_keys_artifact, vc_index, node_index
@@ -598,6 +614,7 @@ def launch_lodestar(
         vc_index=vc_index,
         extra_files_artifacts=[],
         distributed=True,
+        builder_config=builder_config,
     )
 
     return plan.add_service(name=vc_service_name, config=config)
@@ -621,6 +638,7 @@ def launch_teku(
     vc_index,
     node_index,
     vc_image,
+    builder_config=None,
 ):
     node_keystore_files = _charon_split_keys_to_keystore_files(
         plan, split_keys_artifact, vc_index, node_index
@@ -647,6 +665,7 @@ def launch_teku(
         vc_index=vc_index,
         extra_files_artifacts=[],
         distributed=True,
+        builder_config=builder_config,
     )
 
     return plan.add_service(name=vc_service_name, config=config)
@@ -670,6 +689,7 @@ def launch_nimbus(
     vc_index,
     node_index,
     vc_image,
+    builder_config=None,
 ):
     node_keystore_files = _charon_split_keys_to_keystore_files(
         plan, split_keys_artifact, vc_index, node_index
@@ -696,6 +716,7 @@ def launch_nimbus(
         vc_index=vc_index,
         extra_files_artifacts=[],
         distributed=True,
+        builder_config=builder_config,
     )
 
     return plan.add_service(name=vc_service_name, config=config)
@@ -846,6 +867,7 @@ def launch_prysm(
     vc_index,
     node_index,
     vc_image,
+    builder_config=None,
 ):
     wallet_artifact, node_keystore_files = _charon_split_keys_to_prysm_wallet(
         plan, split_keys_artifact, vc_index, node_index, vc_image
@@ -874,6 +896,7 @@ def launch_prysm(
         vc_index=vc_index,
         extra_files_artifacts=[],
         distributed=True,
+        builder_config=builder_config,
     )
 
     return plan.add_service(name=vc_service_name, config=config)
@@ -897,10 +920,16 @@ def launch_vouch(
     vc_index,
     node_index,
     vc_image,
+    builder_config=None,
 ):
     vouch_wallet_artifact = _charon_split_keys_to_vouch_wallet(
         plan, split_keys_artifact, vc_index, node_index
     )
+
+    if builder_config != None:
+        plan.print(
+            "Vouch has no direct builder configuration from charon_params, its VCs only get p2p bids"
+        )
 
     config = vouch.get_config(
         plan=plan,
@@ -920,4 +949,31 @@ def launch_vouch(
 def new_charon_launcher(el_cl_genesis_data):
     return struct(
         el_cl_genesis_data=el_cl_genesis_data,
+    )
+
+
+# _builder_config returns the gloas builder settings from charon_params, None when no
+# builder URLs are set. Charon rejects the other builder flags without URLs.
+def _builder_config(charon_params):
+    if charon_params == None:
+        return None
+
+    urls = charon_params.get("builder_urls", [])
+    if len(urls) == 0:
+        for key in [
+            "builder_min_bid",
+            "builder_boost_factor",
+            "builder_max_execution_payment",
+        ]:
+            if key in charon_params:
+                fail(
+                    "charon_params.{0} requires charon_params.builder_urls".format(key)
+                )
+        return None
+
+    return struct(
+        urls=urls,
+        min_bid=charon_params.get("builder_min_bid", 0),
+        boost_factor=charon_params.get("builder_boost_factor", 100),
+        max_execution_payment=charon_params.get("builder_max_execution_payment", 0),
     )

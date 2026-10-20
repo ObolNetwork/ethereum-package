@@ -7,6 +7,10 @@ RUST_BACKTRACE_ENVVAR_NAME = "RUST_BACKTRACE"
 RUST_FULL_BACKTRACE_KEYWORD = "full"
 
 
+BUILDER_DEFINITIONS_MOUNT_DIRPATH = "/builder-config"
+BUILDER_DEFINITIONS_FILENAME = "builder_definitions.yml"
+
+
 def get_config(
     plan,
     participant,
@@ -33,6 +37,7 @@ def get_config(
     otel_otlp_grpc_url=None,
     vc_binary_artifact=None,
     distributed=False,
+    builder_config=None,
 ):
     log_level = input_parser.get_client_log_level_or_default(
         participant.vc_log_level, global_log_level, vc_shared.VERBOSITY_LEVELS
@@ -149,5 +154,60 @@ def get_config(
         "lighthouse",
     )
 
+    # Gloas builders charon requests bids from directly; the VC signs their builder
+    # request auths for charon to aggregate.
+    if builder_config != None:
+        _apply_builder_definitions(
+            plan, config_args, service_name, validator_keys_dirpath, builder_config
+        )
+
     vc_shared.apply_resource_limits(config_args, participant)
     return ServiceConfig(**config_args)
+
+
+# Lighthouse reads its gloas builders from builder_definitions.yml in the validators
+# dir, rendered from charon's builder settings as CDVN's lighthouse/run.sh does (builder
+# entries fall back to the top-level settings, JSON is valid YAML). The validators dir
+# is inside the keystore artifact, so the rendered file is copied in at start.
+def _apply_builder_definitions(
+    plan, config_args, service_name, validator_keys_dirpath, builder_config
+):
+    definitions = {
+        "min_bid": builder_config.min_bid,
+        "builder_boost_factor": builder_config.boost_factor,
+        "builders": [
+            {
+                "enabled": True,
+                "url": url,
+                "max_execution_payment": builder_config.max_execution_payment,
+            }
+            for url in builder_config.urls
+        ],
+    }
+    artifact = plan.render_templates(
+        config={
+            BUILDER_DEFINITIONS_FILENAME: struct(
+                template=json.encode(definitions), data={}
+            ),
+        },
+        name=service_name + "-builder-definitions",
+    )
+    config_args["files"][BUILDER_DEFINITIONS_MOUNT_DIRPATH] = artifact
+
+    copy = "cp {0}/{1} {2}/{1}".format(
+        BUILDER_DEFINITIONS_MOUNT_DIRPATH,
+        BUILDER_DEFINITIONS_FILENAME,
+        validator_keys_dirpath,
+    )
+    if "entrypoint" in config_args:
+        # Already wrapped in a shell, e.g. by a binary override.
+        config_args["cmd"] = [copy + " && " + config_args["cmd"][0]]
+    else:
+        config_args["entrypoint"] = ["sh", "-c"]
+        config_args["cmd"] = [
+            copy
+            + " && exec "
+            + " ".join(
+                ["'" + a.replace("'", "'\\''") + "'" for a in config_args["cmd"]]
+            )
+        ]

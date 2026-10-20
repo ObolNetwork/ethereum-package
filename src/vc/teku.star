@@ -29,6 +29,7 @@ def get_config(
     otel_otlp_grpc_url=None,
     vc_binary_artifact=None,
     distributed=False,
+    builder_config=None,
 ):
     validator_keys_dirpath = ""
     validator_secrets_dirpath = ""
@@ -97,6 +98,18 @@ def get_config(
         cmd.append("--Xobol-dvt-integration-enabled=true")
         cmd.append("--validators-builder-registration-default-enabled=true")
         cmd.append("--Xvalidator-client-beacon-api-executor-threads=500")
+
+    # Gloas builders charon requests bids from directly; the VC signs their builder
+    # request auths for charon to aggregate. Teku's builder settings are global.
+    if builder_config != None:
+        cmd.append("--Xbuilder-urls=" + ",".join(builder_config.urls))
+        cmd.append("--Xbuilder-min-bid={0}".format(builder_config.min_bid))
+        cmd.append("--Xbuilder-boost-factor={0}".format(builder_config.boost_factor))
+        cmd.append(
+            "--Xbuilder-max-execution-payment={0}".format(
+                builder_config.max_execution_payment
+            )
+        )
 
     if len(participant.vc_extra_params) > 0:
         # this is a repeated<proto type>, we convert it into Starlark

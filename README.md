@@ -598,6 +598,26 @@ participants:
       # - prysm: gcr.io/prysmaticlabs/prysm/validator:latest
       charon_vc_image: sigp/lighthouse:latest
 
+      # Gloas builders Charon requests execution payload bids from directly
+      # (--builder-urls), e.g. a buildoor instance: http://buildoor-<cl>-<el>-<idx>:8080
+      # Charon's VCs are configured with the same builders and sign their builder
+      # request auths. Nimbus takes only the first builder, Vouch none.
+      # Defaults to [] (no direct builders, p2p bids only)
+      builder_urls: []
+
+      # Minimum builder bid in gwei, below it the local payload wins. Requires builder_urls.
+      # Defaults to 0
+      builder_min_bid: 0
+
+      # Percentage multiplier applied to builder bids against the local payload. Requires builder_urls.
+      # Defaults to 100
+      builder_boost_factor: 100
+
+      # Maximum execution layer payment in gwei counted towards a bid, 0 counts trustless bids only.
+      # Requires builder_urls.
+      # Defaults to 0
+      builder_max_execution_payment: 0
+
     # Whether to use a remote signer instead of the vc directly handling keys
     # Note Lighthouse VC does not support this flag
     # Defaults to false
