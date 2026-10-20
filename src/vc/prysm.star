@@ -41,6 +41,7 @@ def get_config(
     otel_otlp_grpc_url=None,
     vc_binary_artifact=None,
     distributed=False,
+    builder_config=None,
 ):
     validator_keys_dirpath = shared_utils.path_join(
         constants.VALIDATOR_KEYS_DIRPATH_ON_SERVICE_CONTAINER,
@@ -111,6 +112,18 @@ def get_config(
 
     if distributed:
         cmd.append("--distributed")
+
+    # Gloas builders charon requests bids from directly; the VC signs their builder
+    # request auths for charon to aggregate.
+    if builder_config != None:
+        cmd.append("--builder-urls=" + ",".join(builder_config.urls))
+        cmd.append("--builder-min-bid={0}".format(builder_config.min_bid))
+        cmd.append("--builder-boost-factor={0}".format(builder_config.boost_factor))
+        cmd.append(
+            "--builder-max-execution-payment={0}".format(
+                builder_config.max_execution_payment
+            )
+        )
 
     keymanager_api_cmd = [
         "--rpc",

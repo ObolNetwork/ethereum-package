@@ -30,6 +30,7 @@ def get_config(
     otel_otlp_grpc_url=None,
     vc_binary_artifact=None,
     distributed=False,
+    builder_config=None,
 ):
     log_level = input_parser.get_client_log_level_or_default(
         participant.vc_log_level, global_log_level, vc_shared.VERBOSITY_LEVELS
@@ -93,6 +94,22 @@ def get_config(
         cmd.append("--distributed")
         cmd.append("--builder")
         cmd.append("--builder.selection=builderalways")
+
+    # Gloas builders charon requests bids from directly; the VC signs their builder
+    # request auths for charon to aggregate.
+    if builder_config != None:
+        cmd.append("--builder.urls=" + ",".join(builder_config.urls))
+        cmd.append("--builder.minBid={0}".format(builder_config.min_bid))
+        cmd.append("--builder.boostFactor={0}".format(builder_config.boost_factor))
+        cmd.append(
+            "--builder.maxExecutionPayment={0}".format(
+                builder_config.max_execution_payment
+            )
+        )
+        # Lodestar refuses a max execution payment above 0 (trusted payments) without
+        # an explicit opt-in.
+        if builder_config.max_execution_payment > 0:
+            cmd.append("--allowDangerousTrustedPayments")
 
     if len(participant.vc_extra_params) > 0:
         # this is a repeated<proto type>, we convert it into Starlark

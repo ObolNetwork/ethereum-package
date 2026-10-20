@@ -29,6 +29,7 @@ def get_config(
     otel_otlp_grpc_url=None,
     vc_binary_artifact=None,
     distributed=False,
+    builder_config=None,
 ):
     validator_keys_dirpath = ""
     validator_secrets_dirpath = ""
@@ -92,6 +93,18 @@ def get_config(
         # boundary (FATAL, exit 127), taking down the whole DV. Standalone
         # (non-distributed) Nimbus VCs keep doppelganger detection enabled.
         cmd.append("--doppelganger-detection=false")
+
+    # Gloas builders charon requests bids from directly. Nimbus takes a single builder,
+    # the first of charon's, whose request auth it signs for charon to aggregate.
+    if builder_config != None:
+        cmd.append("--payload-builder-url=" + builder_config.urls[0])
+        cmd.append("--builder-min-bid={0}".format(builder_config.min_bid))
+        cmd.append("--builder-boost-factor={0}".format(builder_config.boost_factor))
+        cmd.append(
+            "--builder-max-execution-payment={0}".format(
+                builder_config.max_execution_payment
+            )
+        )
 
     if len(participant.vc_extra_params) > 0:
         # this is a repeated<proto type>, we convert it into Starlark
