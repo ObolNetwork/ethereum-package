@@ -59,6 +59,25 @@ def charon_keystore_format_cmd(output_dirpath):
     )
 
 
+def keystore_artifact_basename(
+    padded_idx, participant, keystore_start_index, keystore_end_index_inclusive
+):
+    if participant.el_type == constants.EL_TYPE.none:
+        return "{0}-{1}-{2}-{3}".format(
+            padded_idx,
+            participant.cl_type,
+            keystore_start_index,
+            keystore_end_index_inclusive,
+        )
+    return "{0}-{1}-{2}-{3}-{4}".format(
+        padded_idx,
+        participant.cl_type,
+        participant.el_type,
+        keystore_start_index,
+        keystore_end_index_inclusive,
+    )
+
+
 # Launches a prelaunch data generator IMAGE, for use in various of the genesis generation
 def launch_prelaunch_data_generator(
     plan,
@@ -174,10 +193,9 @@ def generate_validator_keystores(plan, mnemonic, participants, docker_cache_para
             running_total_validator_count + participant.validator_count
         )
 
-        artifact_name = "{0}-{1}-{2}-{3}-{4}".format(
+        artifact_name = keystore_artifact_basename(
             padded_idx,
-            participant.cl_type,
-            participant.el_type,
+            participant,
             keystore_start_index,
             keystore_stop_index - 1,
         )
@@ -351,10 +369,9 @@ def generate_validator_keystores_in_parallel(
         keystore_start_index = running_total_validator_count
         running_total_validator_count += participant.validator_count
         keystore_stop_index = (keystore_start_index + participant.validator_count) - 1
-        artifact_name = "{0}-{1}-{2}-{3}-{4}".format(
+        artifact_name = keystore_artifact_basename(
             padded_idx,
-            participant.cl_type,
-            participant.el_type,
+            participant,
             keystore_start_index,
             keystore_stop_index,
         )

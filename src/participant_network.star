@@ -19,11 +19,12 @@ launch_public_network = import_module("./network_launcher/public_network.star")
 launch_devnet = import_module("./network_launcher/devnet.star")
 launch_kurtosis = import_module("./network_launcher/kurtosis.star")
 launch_shadowfork = import_module("./network_launcher/shadowfork.star")
+launch_remote_enclave = import_module("./network_launcher/remote_enclave.star")
 
 el_client_launcher = import_module("./el/el_launcher.star")
 cl_client_launcher = import_module("./cl/cl_launcher.star")
 vc = import_module("./vc/vc_launcher.star")
-vc_shared = import_module("./vc/shared.star")
+vc_shared = import_module("./vc/vc_shared.star")
 vc_context_l = import_module("./vc/vc_context.star")
 node_metrics = import_module("./node_metrics_info.star")
 charon_launcher = import_module("./vc/charon_launcher.star")
@@ -50,6 +51,8 @@ def launch_participant_network(
     parallel_keystore_generation,
     extra_files_artifacts,
     tempo_otlp_grpc_url,
+    otel_otlp_grpc_url,
+    otel_otlp_http_traces_url,
     backend,
 ):
     network_id = network_params.network_id
@@ -90,6 +93,21 @@ def launch_participant_network(
             static_files.EL_CL_GENESIS_ADDITIONAL_CONTRACTS_TEMPLATE_FILEPATH
         )
 
+        # Temporary hack while FOCIL is kept separate from frames: if
+        # network_params.frames_enabled is set or any participant runs a
+        # "frame" image, disable the Heze fork on the CL side
+        # (FRAMES_ENABLED=true) while the EL still activates bogota at
+        # HEZE_FORK_EPOCH.
+        frames_enabled = network_params.frames_enabled
+        for participant in args_with_right_defaults.participants:
+            if (
+                "frame" in participant.el_image
+                or "frame" in participant.cl_image
+                or "frame" in participant.vc_image
+            ):
+                frames_enabled = True
+                break
+
         el_cl_data = el_cl_genesis_data_generator.generate_el_cl_genesis_data(
             plan,
             ethereum_genesis_generator_image,
@@ -100,6 +118,20 @@ def launch_participant_network(
             network_params,
             total_number_of_validator_keys,
             latest_block.files_artifacts[0] if latest_block != "" else "",
+            frames_enabled,
+            global_tolerations,
+            global_node_selectors,
+        )
+    elif network_params.network.startswith(constants.NETWORK_NAME.remote_enclave):
+        # We are syncing from another running kurtosis enclave
+        (
+            el_cl_data,
+            final_genesis_timestamp,
+            network_id,
+            validator_data,
+        ) = launch_remote_enclave.launch(
+            plan,
+            network_params.network,
             global_tolerations,
             global_node_selectors,
         )
@@ -146,10 +178,15 @@ def launch_participant_network(
     # Launch bootnodoor if configured
     bootnodoor_enr = None
     bootnodoor_enode = None
+    bootnodoor_el_enr = None
     if "bootnodoor" in args_with_right_defaults.additional_services:
         plan.print("Launching bootnodoor as bootnode service")
         args_with_right_defaults.additional_services.remove("bootnodoor")
-        bootnodoor_enr, bootnodoor_enode = bootnodoor_launcher.launch_bootnodoor(
+        (
+            bootnodoor_enr,
+            bootnodoor_enode,
+            bootnodoor_el_enr,
+        ) = bootnodoor_launcher.launch_bootnodoor(
             plan,
             args_with_right_defaults.bootnodoor_params,
             el_cl_data,
@@ -157,9 +194,14 @@ def launch_participant_network(
             global_node_selectors,
             global_tolerations,
             args_with_right_defaults.docker_cache_params,
+            args_with_right_defaults.port_publisher,
+            # Index past the remaining additional services so public ports don't collide
+            len(args_with_right_defaults.additional_services),
+            backend,
         )
-        plan.print("Bootnodoor launched with ENR: {0}".format(bootnodoor_enr))
+        plan.print("Bootnodoor launched with CL ENR: {0}".format(bootnodoor_enr))
         plan.print("Bootnodoor launched with ENODE: {0}".format(bootnodoor_enode))
+        plan.print("Bootnodoor launched with EL ENR: {0}".format(bootnodoor_el_enr))
 
     # Upload binary artifacts when both binary_path and force_restart are enabled
     binary_artifacts = {}
@@ -199,7 +241,9 @@ def launch_participant_network(
         args_with_right_defaults.mev_params,
         extra_files_artifacts,
         bootnodoor_enode,
+        bootnodoor_el_enr,
         binary_artifacts,
+        otel_otlp_grpc_url,
     )
 
     # Launch all consensus layer clients
@@ -232,6 +276,8 @@ def launch_participant_network(
         global_tolerations,
         persistent,
         tempo_otlp_grpc_url,
+        otel_otlp_grpc_url,
+        otel_otlp_http_traces_url,
         num_participants,
         validator_data,
         prysm_password_relative_filepath,
@@ -349,7 +395,7 @@ def launch_participant_network(
             participant.node_selectors,
             global_node_selectors,
         )
-        if participant.ethereum_metrics_exporter_enabled:
+        if participant.ethereum_metrics_exporter_enabled and el_context != None:
             pair_name = "{0}-{1}-{2}".format(index_str, cl_type, el_type)
 
             ethereum_metrics_exporter_service_name = (
@@ -383,7 +429,10 @@ def launch_participant_network(
             xatu_sentry_context = None
 
         if participant.xatu_sentry_enabled:
-            pair_name = "{0}-{1}-{2}".format(index_str, cl_type, el_type)
+            if el_type == constants.EL_TYPE.none:
+                pair_name = "{0}-{1}".format(index_str, cl_type)
+            else:
+                pair_name = "{0}-{1}-{2}".format(index_str, cl_type, el_type)
 
             xatu_sentry_service_name = "xatu-sentry-{0}".format(pair_name)
 
@@ -407,7 +456,7 @@ def launch_participant_network(
 
         # Create snooper RPC context for all participants if snooper is enabled
         snooper_el_rpc_context = None
-        if participant.snooper_enabled:
+        if participant.snooper_enabled and el_context != None:
             snooper_service_name = "snooper-rpc-{0}-{1}".format(
                 index_str,
                 el_type,
@@ -490,20 +539,28 @@ def launch_participant_network(
 
         all_snooper_beacon_contexts.append(snooper_beacon_context)
 
-        full_name = (
-            "{0}-{1}-{2}-{3}".format(
-                index_str,
-                el_type,
-                cl_type,
-                vc_type,
+        # Match cl_launcher naming: no el segment when EL_TYPE.none (cl-idx-cl vs cl-idx-cl-el).
+        if el_type == constants.EL_TYPE.none:
+            full_name = (
+                "{0}-{1}-{2}".format(index_str, cl_type, vc_type)
+                if participant.cl_type != participant.vc_type
+                else "{0}-{1}".format(index_str, cl_type)
             )
-            if participant.cl_type != participant.vc_type
-            else "{0}-{1}-{2}".format(
-                index_str,
-                el_type,
-                cl_type,
+        else:
+            full_name = (
+                "{0}-{1}-{2}-{3}".format(
+                    index_str,
+                    el_type,
+                    cl_type,
+                    vc_type,
+                )
+                if participant.cl_type != participant.vc_type
+                else "{0}-{1}-{2}".format(
+                    index_str,
+                    el_type,
+                    cl_type,
+                )
             )
-        )
 
         if participant.use_remote_signer:
             remote_signer_context = remote_signer.launch(
@@ -570,7 +627,6 @@ def launch_participant_network(
             global_log_level=args_with_right_defaults.global_log_level,
             cl_context=get_cl_context_with_blobber_url(cl_context),
             all_cl_contexts=all_cl_contexts,
-            el_context=el_context,
             remote_signer_context=remote_signer_context,
             full_name=full_name,
             snooper_enabled=participant.snooper_enabled,
@@ -586,6 +642,7 @@ def launch_participant_network(
             vc_index=current_vc_index,
             extra_files_artifacts=extra_files_artifacts,
             tempo_otlp_grpc_url=tempo_otlp_grpc_url,
+            otel_otlp_grpc_url=otel_otlp_grpc_url,
             vc_binary_artifact=vc_binary_artifact,
         )
         if vc_service_config == None:
